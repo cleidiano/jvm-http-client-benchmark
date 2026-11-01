@@ -1,0 +1,14 @@
+[versions]
+jmh = "1.37"
+jmh-plugin = "0.7.4"
+httpclient5 = "5.6.5"
+okhttp = "5.5.1"
+jetty = "12.1.14"
+
+[libraries]
+httpclient5 = { module = "org.apache.httpcomponents.client5:httpclient5", version.ref = "httpclient5" }
+okhttp = { module = "com.squareup.okhttp3:okhttp-jvm", version.ref = "okhttp" }
+jetty-client = { module = "org.eclipse.jetty:jetty-client", version.ref = "jetty" }
+
+[plugins]
+jmh = { id = "me.champeau.jmh", version.ref = "jmh-plugin" }

@@ -1,0 +1,7 @@
+io.github.cleidiano.httpbench.clients.JdkBenchClient$Provider
+io.github.cleidiano.httpbench.clients.JdkBenchClient$VirtualThreadsProvider
+io.github.cleidiano.httpbench.clients.Apache5BenchClient$Provider
+io.github.cleidiano.httpbench.clients.OkHttpBenchClient$Provider
+io.github.cleidiano.httpbench.clients.JettyBenchClient$Provider
+io.github.cleidiano.httpbench.clients.JettyBenchClient$VirtualThreadsProvider
+io.github.cleidiano.httpbench.clients.OkHttpShardedBenchClient$Provider

@@ -1,0 +1,17 @@
+# Build
+.gradle/
+build/
+.kotlin/
+out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Local benchmark runs and raw logs; curated results live in results/<machine>/
+results/local/
+results/logs/
+
+# Drafts not meant for the repository
+docs/drafts/
