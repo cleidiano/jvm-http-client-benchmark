@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every README scenario in one go, unattended. Takes about 4 hours with the defaults.
+# Runs every README scenario in one go, unattended. Takes about 5 hours with the defaults.
 #
 #   scripts/run-all.sh                  # all scenarios
 #   scripts/run-all.sh --only 1,3       # a subset
@@ -8,7 +8,7 @@
 #   scripts/run-all.sh --quick          # minimal iterations (~10 min): checks the whole pipeline
 #                                       # on this machine; the numbers are meaningless
 #
-# Env: JAVA_VT     java binary of a JDK 24+ (required for scenarios 5, 6 and 7)
+# Env: JAVA_VT     java binary of a JDK 24+ (required for scenarios 5, 6, 7 and 9)
 #      BENCH_CPUS / SERVER_CPUS / JAVA  as in bench.sh and server.sh; every other bench.sh or
 #      server.sh variable in your shell is ignored, since each scenario sets its own
 #
@@ -33,7 +33,7 @@ source scripts/lib/cpu.sh
 unset NETWORK LATENCY EXECUTOR PIN_TRACE BASE_URI MAX_CONNECTIONS TUNE_CPU FAIL_ON_ERROR LABEL RESULTS_DIR
 
 PROFILER=io.github.cleidiano.httpbench.bench.ResourceProfiler
-ALL_SCENARIOS=(1 2 3 4 5 6 7)
+ALL_SCENARIOS=(1 2 3 4 5 6 7 8 9)
 declare -A TITLE=(
   [1]="Cost per request (loopback, 1 thread)"
   [2]="Concurrency on loopback (4 and 16 threads)"
@@ -42,8 +42,10 @@ declare -A TITLE=(
   [5]="Virtual threads vs platform threads (JDK 24+, 20ms RTT)"
   [6]="Async APIs, one calling thread (JDK 24+, 20ms RTT)"
   [7]="Async APIs on virtual threads (JDK 24+, 20ms RTT)"
+  [8]="Spring and Feign layers: cost per request (loopback)"
+  [9]="Spring WebClient async vs raw async (JDK 24+, 20ms RTT)"
 )
-declare -A MINUTES=([1]=48 [2]=39 [3]=10 [4]=29 [5]=60 [6]=20 [7]=20)
+declare -A MINUTES=([1]=48 [2]=39 [3]=10 [4]=29 [5]=60 [6]=20 [7]=20 [8]=55 [9]=15)
 
 # --- arguments ---------------------------------------------------------------------------------
 
@@ -88,8 +90,12 @@ for tool in docker curl taskset python3; do
 done
 docker info >/dev/null 2>&1 || die "docker is not usable by this user"
 
-if [[ " ${selected[*]} " == *" 5 "* || " ${selected[*]} " == *" 6 "* || " ${selected[*]} " == *" 7 "* ]]; then
-  [[ -n ${JAVA_VT:-} ]] || die "scenarios 5-7 need JAVA_VT=/path/to/jdk-24+/bin/java (or use --only without them)"
+needs_vt=0
+for n in "${selected[@]}"; do
+  case "$n" in 5 | 6 | 7 | 9) needs_vt=1 ;; esac
+done
+if [[ $needs_vt == 1 ]]; then
+  [[ -n ${JAVA_VT:-} ]] || die "scenarios 5, 6, 7 and 9 need JAVA_VT=/path/to/jdk-24+/bin/java (or use --only without them)"
   vt_feature=$("$JAVA_VT" -XshowSettings:properties -version 2>&1 \
     | awk -F'= ' '/java.specification.version/ {print $2}')
   [[ ${vt_feature:-0} -ge 24 ]] || die "JAVA_VT must be JDK 24+ (got '${vt_feature:-unknown}')"
@@ -227,6 +233,29 @@ scenario_7() {
   server 7
   bench async-vt GetAsyncBenchmark -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async \
     -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
+}
+
+# Each Spring/Feign layer next to the raw client it wraps (same NativeClients configuration), so
+# the difference is the cost of the layer. apache5-async is the raw base of spring-webclient-apache5.
+LAYER_CLIENTS=apache5,apache5-async,jdk,jetty,okhttp,reactor
+LAYER_CLIENTS+=,spring-restclient-apache5,spring-restclient-jdk,spring-restclient-jetty,spring-restclient-reactor
+LAYER_CLIENTS+=,spring-webclient-apache5,spring-webclient-jdk,spring-webclient-jetty,spring-webclient-reactor
+LAYER_CLIENTS+=,feign-apache5,feign-jdk,feign-okhttp
+
+scenario_8() {
+  export NETWORK=host LATENCY=
+  server 8
+  bench layers-t1 GetBenchmark -p client="$LAYER_CLIENTS" -p payload=1k,100k -t 1 "${FORKS_2[@]}" \
+    -prof gc -prof "$PROFILER"
+}
+
+# WebClient used asynchronously, next to the raw async client it wraps; same conditions as scenario 6.
+scenario_9() {
+  export NETWORK=bridge LATENCY=20ms JAVA=$JAVA_VT MAX_CONNECTIONS=1024
+  server 9
+  bench layers-async GetAsyncBenchmark \
+    -p client=apache5-async,jdk-async,jetty-async,reactor-async,spring-webclient-apache5,spring-webclient-jdk,spring-webclient-jetty,spring-webclient-reactor \
+    -p inFlight=1024 -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
 }
 
 # --- run ----------------------------------------------------------------------------------------

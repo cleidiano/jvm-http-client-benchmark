@@ -6,16 +6,11 @@ import io.github.cleidiano.httpbench.api.ClientConfig;
 import io.github.cleidiano.httpbench.api.HttpStatusException;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
-import org.apache.hc.client5.http.config.ConnectionConfig;
-import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.core5.http.ClassicHttpResponse;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
-import org.apache.hc.core5.util.Timeout;
 
 import java.io.IOException;
 
@@ -29,24 +24,7 @@ public final class Apache5BenchClient implements BenchClient {
 
     Apache5BenchClient(ClientConfig config) {
         this.baseUri = config.baseUri();
-        var timeout = Timeout.ofMilliseconds(config.timeout().toMillis());
-        var connectionManager = PoolingHttpClientConnectionManagerBuilder.create()
-                .setMaxConnTotal(config.maxConnections())
-                .setMaxConnPerRoute(config.maxConnections())
-                .setDefaultConnectionConfig(ConnectionConfig.custom()
-                        .setConnectTimeout(timeout)
-                        .setSocketTimeout(timeout)
-                        .build())
-                .build();
-        this.client = HttpClients.custom()
-                .setConnectionManager(connectionManager)
-                .setDefaultRequestConfig(RequestConfig.custom().setResponseTimeout(timeout).build())
-                // Defaults add gzip negotiation, cookies, redirects and retries; the other clients don't.
-                .disableContentCompression()
-                .disableCookieManagement()
-                .disableRedirectHandling()
-                .disableAutomaticRetries()
-                .build();
+        this.client = NativeClients.apache5(config);
     }
 
     @Override

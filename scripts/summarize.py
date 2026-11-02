@@ -14,8 +14,16 @@ import json
 import sys
 from collections import defaultdict
 
-PREFERRED_ORDER = ["apache5", "okhttp", "jetty", "jetty-vt", "jdk", "jdk-vt",
-                   "apache5-async", "okhttp-async", "jetty-async", "jdk-async", "okhttp-sharded"]
+# Each layer right below the raw client it wraps; raw clients keep their usual relative order.
+PREFERRED_ORDER = [
+    "apache5", "spring-restclient-apache5", "feign-apache5",
+    "okhttp", "feign-okhttp", "okhttp-sharded",
+    "jetty", "jetty-vt", "spring-restclient-jetty", "spring-webclient-jetty",
+    "jdk", "jdk-vt", "spring-restclient-jdk", "spring-webclient-jdk", "feign-jdk",
+    "reactor", "spring-restclient-reactor", "spring-webclient-reactor",
+    "apache5-async", "spring-webclient-apache5", "okhttp-async", "okhttp-vt-async",
+    "jetty-async", "jetty-vt-async", "jdk-async", "jdk-vt-async", "reactor-async",
+]
 
 
 def client_order(name):

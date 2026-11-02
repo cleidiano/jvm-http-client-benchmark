@@ -20,13 +20,26 @@
 | `jdk-vt-async` | same as `jdk-async` | internal executor on virtual threads |
 | `jetty-vt-async` | same as `jetty-async` | internal pool on virtual threads (`VirtualThreadPool`) |
 | `okhttp-vt-async` | same as `okhttp-async` | dispatcher runs each call on a virtual thread |
+| `reactor` / `reactor-async` | Reactor Netty 1.3.8 | `block()` / `toFuture()`; the engine behind Spring's WebClient |
 
-By default the blocking benchmarks run the first four; the `-vt` variants are selected with
-`-p client=...` (scenario 5), and the `-async` ones are used by `GetAsyncBenchmark` (scenarios 6 and 7).
+Abstraction layers, each wrapping one of the raw clients above (built by the same
+`NativeClients` code, so the configuration is identical):
+
+| Client | Layer | Underlying client |
+|---|---|---|
+| `spring-restclient-{apache5,jdk,jetty,reactor}` | Spring 7.0.10 `RestClient` | Apache classic, JDK, Jetty, Reactor Netty |
+| `spring-webclient-{apache5,jdk,jetty,reactor}` | Spring 7.0.10 `WebClient` (`block()` or `toFuture()`) | Apache async, JDK, Jetty, Reactor Netty |
+| `feign-{apache5,jdk,okhttp}` | OpenFeign 13.17 (plain, no Spring Cloud) | Apache classic, JDK, OkHttp |
+
+Spring 7 has no OkHttp integration, and OpenFeign has no official Jetty client, hence the gaps.
+
+By default the blocking benchmarks run the first four raw clients; the others are selected with
+`-p client=...` (scenarios 5, 8 and 9), and the async ones are used by `GetAsyncBenchmark`
+(scenarios 6, 7 and 9).
 
 ## Requirements
 
-- JDK 21 (JDK 24+ for scenarios 5, 6 and 7)
+- JDK 21 (JDK 24+ for scenarios 5, 6, 7 and 9)
 - Linux, Docker (your user in the `docker` group)
 - Optional: `sudo` + `cpupower`, to pin the CPU frequency (`TUNE_CPU=1`)
 
@@ -36,7 +49,8 @@ The build uses the Gradle Wrapper (`./gradlew`); nothing else needs to be instal
 
 ```
 bench-api/      common contract: BenchClient, ClientConfig, BenchClientProvider (ServiceLoader)
-clients/        one adapter per library
+clients/        one adapter per library; NativeClients configures every underlying client
+clients-abstractions/  Spring RestClient and WebClient, OpenFeign, on top of NativeClients
 benchmarks/     GetBenchmark, PostBenchmark, GetAsyncBenchmark, ResourceProfiler (src/jmh)
 server/nginx/   nginx.conf + payload generation (/bytes/0, /bytes/1k, /bytes/100k, /post)
 server/netem/   helper image with `tc` to simulate network latency
@@ -79,7 +93,7 @@ scripts/server.sh stop
 
 ## Run everything
 
-`scripts/run-all.sh` runs all seven scenarios below in one go (about 4 hours), unattended:
+`scripts/run-all.sh` runs all nine scenarios below in one go (about 5 hours), unattended:
 
 ```bash
 scripts/run-all.sh --quick --no-tune      # ~10 min dry run: checks the whole pipeline here
@@ -363,6 +377,58 @@ Time: ~20 min. Compare each `*-vt-async` client with its `*-async` counterpart f
 `apache5-async` should match across both runs. Needs JDK 24+ for the same pinning reasons as
 scenario 5 (the benchmark refuses `*-vt*` clients with virtual-thread callers on older JDKs).
 
+### 8. Spring and Feign layers: cost per request
+
+> How much does each abstraction layer add on top of the client it wraps?
+
+Every layer runs next to the raw client it wraps, on loopback with one thread (like scenario 1),
+so the difference in time, CPU and allocation per request is the cost of the layer itself. The
+response is read as `byte[]` everywhere: this measures the HTTP abstraction (URI building, request
+and response wrapping, status handling, the byte-array converter), not JSON conversion.
+
+```bash
+(
+  set -e
+  export NETWORK=host LATENCY=
+  sudo -v
+  scripts/server.sh restart
+  TUNE_CPU=1 LABEL=layers-t1 scripts/bench.sh GetBenchmark \
+    -p client=apache5,apache5-async,jdk,jetty,okhttp,reactor,spring-restclient-apache5,spring-restclient-jdk,spring-restclient-jetty,spring-restclient-reactor,spring-webclient-apache5,spring-webclient-jdk,spring-webclient-jetty,spring-webclient-reactor,feign-apache5,feign-jdk,feign-okhttp \
+    -p payload=1k,100k -t 1 -f 2 -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
+  scripts/server.sh stop
+)
+```
+
+Time: ~55 min. Pairs to compare: `apache5` with `spring-restclient-apache5` and `feign-apache5`;
+`apache5-async` with `spring-webclient-apache5`; `jdk`, `jetty` and `reactor` with their
+`spring-restclient-*`, `spring-webclient-*` and `feign-jdk`; `okhttp` with `feign-okhttp`.
+
+Settings that differ from each framework's defaults, so that only the layer is measured:
+Spring 7's `JdkClientHttpRequestFactory` enables compression by default (it is disabled here,
+like in every other client), and Feign runs with no retries and the same timeouts.
+
+### 9. Spring WebClient used asynchronously
+
+> Used as intended (non-blocking), what does WebClient cost on top of the async client it wraps?
+
+Same conditions as scenario 6, at 1,024 requests in flight from one thread.
+
+```bash
+(
+  set -e
+  export NETWORK=bridge LATENCY=20ms
+  export JAVA=/path/to/jdk-25/bin/java MAX_CONNECTIONS=1024
+  sudo -v
+  scripts/server.sh restart
+  TUNE_CPU=1 LABEL=layers-async scripts/bench.sh GetAsyncBenchmark \
+    -p client=apache5-async,jdk-async,jetty-async,reactor-async,spring-webclient-apache5,spring-webclient-jdk,spring-webclient-jetty,spring-webclient-reactor \
+    -p inFlight=1024 -t 1 -f 2 -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
+  scripts/server.sh stop
+)
+```
+
+Time: ~15 min.
+
 ## Analyzing results
 
 ```bash
@@ -394,7 +460,7 @@ To publish results, move the files you want from `results/local/` to `results/<m
 | `BENCH_CPUS` | bench.sh | `0,2` | JMH CPUs |
 | `TUNE_CPU` | bench.sh | `0` | `1` pins the CPU frequency during the run (sudo) |
 | `FAIL_ON_ERROR` | bench.sh | `1` | `0` keeps running the remaining benchmarks after one throws (run-all.sh uses it) |
-| `JAVA_VT` | run-all.sh | — | JDK 24+ `java` for scenarios 5, 6 and 7 |
+| `JAVA_VT` | run-all.sh | — | JDK 24+ `java` for scenarios 5, 6, 7 and 9 |
 | `LABEL` | bench.sh | — | suffix of the results file |
 | `RESULTS_DIR` | bench.sh | `results/local` | where results go (ignored by git) |
 | `JAVA` | bench.sh | `java` on PATH | JDK used for the benchmark |
@@ -430,7 +496,7 @@ Extra arguments to `bench.sh` go straight to JMH:
 
 ## Next steps
 
-- Spring `RestClient` / `WebClient` and Spring Cloud OpenFeign, measuring each layer's cost on
-  top of the same client
+- JSON to object conversion through each layer (Jackson), and Spring Cloud OpenFeign / Spring
+  HTTP Interface on top of the layers measured here
 - HTTP/2 and TLS
 - POST and large bodies through the async APIs

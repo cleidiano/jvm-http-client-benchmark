@@ -38,15 +38,7 @@ public final class JdkBenchClient implements AsyncBenchClient {
         this.baseUri = config.baseUri();
         this.timeout = config.timeout();
         this.ownedExecutor = executor;
-        var builder = HttpClient.newBuilder()
-                // Default is HTTP_2, which sends an h2c Upgrade header on cleartext requests.
-                .version(HttpClient.Version.HTTP_1_1)
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .connectTimeout(config.timeout());
-        if (executor != null) {
-            builder.executor(executor);
-        }
-        this.client = builder.build();
+        this.client = NativeClients.jdk(config, executor);
     }
 
     @Override

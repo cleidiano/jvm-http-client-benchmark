@@ -1,7 +1,10 @@
-// Adapters for raw HTTP client libraries (no framework layer).
+// Adapters for raw HTTP client libraries (no framework layer), and NativeClients, where each
+// client is configured. The libraries are `api` so that clients-abstractions can wrap the exact
+// same configured instances.
 dependencies {
     api(project(":bench-api"))
-    implementation(libs.httpclient5)
-    implementation(libs.okhttp)
-    implementation(libs.jetty.client)
+    api(libs.httpclient5)
+    api(libs.okhttp)
+    api(libs.jetty.client)
+    api(libs.reactor.netty.http)
 }

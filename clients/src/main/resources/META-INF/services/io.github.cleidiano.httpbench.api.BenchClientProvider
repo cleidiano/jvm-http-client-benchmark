@@ -12,3 +12,5 @@ io.github.cleidiano.httpbench.clients.JettyBenchClient$AsyncProvider
 io.github.cleidiano.httpbench.clients.JdkBenchClient$VirtualThreadsAsyncProvider
 io.github.cleidiano.httpbench.clients.OkHttpBenchClient$VirtualThreadsAsyncProvider
 io.github.cleidiano.httpbench.clients.JettyBenchClient$VirtualThreadsAsyncProvider
+io.github.cleidiano.httpbench.clients.ReactorNettyBenchClient$Provider
+io.github.cleidiano.httpbench.clients.ReactorNettyBenchClient$AsyncProvider

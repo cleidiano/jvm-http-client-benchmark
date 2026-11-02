@@ -7,15 +7,8 @@ import io.github.cleidiano.httpbench.api.ClientConfig;
 import io.github.cleidiano.httpbench.api.HttpStatusException;
 import org.apache.hc.client5.http.async.methods.SimpleHttpResponse;
 import org.apache.hc.client5.http.async.methods.SimpleRequestBuilder;
-import org.apache.hc.client5.http.config.ConnectionConfig;
-import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.async.CloseableHttpAsyncClient;
-import org.apache.hc.client5.http.impl.async.HttpAsyncClients;
-import org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder;
 import org.apache.hc.core5.concurrent.FutureCallback;
-import org.apache.hc.core5.http2.HttpVersionPolicy;
-import org.apache.hc.core5.reactor.IOReactorConfig;
-import org.apache.hc.core5.util.Timeout;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
@@ -34,27 +27,7 @@ public final class Apache5AsyncBenchClient implements AsyncBenchClient {
 
     Apache5AsyncBenchClient(ClientConfig config) {
         this.baseUri = config.baseUri();
-        var timeout = Timeout.ofMilliseconds(config.timeout().toMillis());
-        var connectionManager = PoolingAsyncClientConnectionManagerBuilder.create()
-                .setMaxConnTotal(config.maxConnections())
-                .setMaxConnPerRoute(config.maxConnections())
-                .setDefaultConnectionConfig(ConnectionConfig.custom()
-                        .setConnectTimeout(timeout)
-                        .setSocketTimeout(timeout)
-                        .build())
-                .build();
-        this.client = HttpAsyncClients.custom()
-                .setConnectionManager(connectionManager)
-                // Same protocol as every other client; the async client could otherwise use HTTP/2.
-                .setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_1)
-                .setIOReactorConfig(IOReactorConfig.custom().setTcpNoDelay(true).setSoTimeout(timeout).build())
-                .setDefaultRequestConfig(RequestConfig.custom().setResponseTimeout(timeout).build())
-                .disableContentCompression()
-                .disableCookieManagement()
-                .disableRedirectHandling()
-                .disableAutomaticRetries()
-                .build();
-        client.start();
+        this.client = NativeClients.apache5Async(config);
     }
 
     @Override

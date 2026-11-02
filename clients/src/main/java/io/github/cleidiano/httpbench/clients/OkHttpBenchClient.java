@@ -7,25 +7,16 @@ import io.github.cleidiano.httpbench.api.ClientConfig;
 import io.github.cleidiano.httpbench.api.HttpStatusException;
 import okhttp3.Call;
 import okhttp3.Callback;
-import okhttp3.ConnectionPool;
-import okhttp3.Dispatcher;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
-import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
-import javax.net.SocketFactory;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.Socket;
-import java.net.SocketException;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 /**
  * OkHttp, synchronous {@code Call.execute()}.
@@ -50,20 +41,7 @@ public final class OkHttpBenchClient implements AsyncBenchClient {
      */
     OkHttpBenchClient(ClientConfig config, ExecutorService dispatcherExecutor) {
         this.baseUri = config.baseUri();
-        var dispatcher = dispatcherExecutor == null ? new Dispatcher() : new Dispatcher(dispatcherExecutor);
-        dispatcher.setMaxRequests(config.maxConnections());
-        dispatcher.setMaxRequestsPerHost(config.maxConnections());
-        this.client = new OkHttpClient.Builder()
-                .protocols(List.of(Protocol.HTTP_1_1))
-                .connectionPool(new ConnectionPool(config.maxConnections(), 5, TimeUnit.MINUTES))
-                .dispatcher(dispatcher)
-                .connectTimeout(config.timeout())
-                .readTimeout(config.timeout())
-                .writeTimeout(config.timeout())
-                .followRedirects(false)
-                .retryOnConnectionFailure(false)
-                .socketFactory(new NoDelaySocketFactory())
-                .build();
+        this.client = NativeClients.okhttp(config, dispatcherExecutor);
     }
 
     @Override
@@ -115,46 +93,6 @@ public final class OkHttpBenchClient implements AsyncBenchClient {
     public void close() {
         client.dispatcher().executorService().shutdown();
         client.connectionPool().evictAll();
-    }
-
-    /**
-     * OkHttp leaves Nagle's algorithm on, unlike the other clients (all enable TCP_NODELAY).
-     * With large uploads the last partial segment then waits for the server's delayed ACK,
-     * adding tens of milliseconds per request, so we enable TCP_NODELAY for parity.
-     */
-    private static final class NoDelaySocketFactory extends SocketFactory {
-        private final SocketFactory delegate = SocketFactory.getDefault();
-
-        private static Socket noDelay(Socket socket) throws SocketException {
-            socket.setTcpNoDelay(true);
-            return socket;
-        }
-
-        @Override
-        public Socket createSocket() throws IOException {
-            return noDelay(delegate.createSocket());
-        }
-
-        @Override
-        public Socket createSocket(String host, int port) throws IOException {
-            return noDelay(delegate.createSocket(host, port));
-        }
-
-        @Override
-        public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException {
-            return noDelay(delegate.createSocket(host, port, localHost, localPort));
-        }
-
-        @Override
-        public Socket createSocket(InetAddress host, int port) throws IOException {
-            return noDelay(delegate.createSocket(host, port));
-        }
-
-        @Override
-        public Socket createSocket(InetAddress address, int port, InetAddress localAddress, int localPort)
-                throws IOException {
-            return noDelay(delegate.createSocket(address, port, localAddress, localPort));
-        }
     }
 
     /** Same client, measured through {@code Call.enqueue} (GetAsyncBenchmark). */

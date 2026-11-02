@@ -1,0 +1,11 @@
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$RestClientApache5
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$RestClientJdk
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$RestClientJetty
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$RestClientReactor
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$WebClientReactor
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$WebClientJdk
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$WebClientJetty
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$WebClientApache5
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$FeignApache5
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$FeignOkHttp
+io.github.cleidiano.httpbench.abstractions.AbstractionProviders$FeignJdk

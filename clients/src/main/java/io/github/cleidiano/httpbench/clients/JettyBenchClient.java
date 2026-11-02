@@ -9,7 +9,6 @@ import org.eclipse.jetty.client.BytesRequestContent;
 import org.eclipse.jetty.client.CompletableResponseListener;
 import org.eclipse.jetty.client.ContentResponse;
 import org.eclipse.jetty.client.HttpClient;
-import org.eclipse.jetty.http.HttpCookieStore;
 import org.eclipse.jetty.util.thread.VirtualThreadPool;
 
 import java.util.concurrent.CompletableFuture;
@@ -26,17 +25,7 @@ public final class JettyBenchClient implements AsyncBenchClient {
      */
     JettyBenchClient(ClientConfig config, boolean virtualThreads) throws Exception {
         this.baseUri = config.baseUri();
-        this.client = new HttpClient();
-        if (virtualThreads) {
-            // The default cap is 200 concurrent tasks; size it to the pool so it never throttles.
-            client.setExecutor(new VirtualThreadPool(Math.max(200, config.maxConnections() * 2)));
-        }
-        client.setMaxConnectionsPerDestination(config.maxConnections());
-        client.setConnectTimeout(config.timeout().toMillis());
-        client.setIdleTimeout(config.timeout().toMillis());
-        client.setFollowRedirects(false);
-        client.setHttpCookieStore(new HttpCookieStore.Empty());
-        client.start();
+        this.client = NativeClients.jetty(config, virtualThreads);
     }
 
     @Override

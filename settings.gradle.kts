@@ -1,3 +1,3 @@
 rootProject.name = "jvm-http-client-benchmark"
 
-include("bench-api", "clients", "benchmarks")
+include("bench-api", "clients", "clients-abstractions", "benchmarks")

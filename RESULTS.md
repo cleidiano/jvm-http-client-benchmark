@@ -30,6 +30,12 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 > async API is 45% faster than its blocking API on platform threads. The **JDK** only benefits once
 > its internal executor runs on virtual threads. **OkHttp's** `enqueue` is not non-blocking: it
 > held 887 platform threads for 1,024 requests in flight.
+>
+> **Spring and Feign layers** cost 10–20 µs of CPU per request on the right engine (RestClient
+> on Apache 5 keeps 91% of the raw client's throughput; WebClient on Reactor Netty keeps 87% when
+> used asynchronously), but the engine matters more than the layer: the same RestClient costs
+> +10 µs on Apache 5 and **+396 µs on the JDK client**, which is what Spring Boot falls back to
+> when no other HTTP library is on the classpath.
 
 ---
 
@@ -49,6 +55,9 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 | Jetty at high concurrency | **Jetty async API**, optionally with `VirtualThreadPool` | +45% over its blocking API on platform threads at 1,024; the virtual-thread pool cuts CPU per request by ~33% at moderate load and threads from 208 to 13 |
 | Virtual threads with Apache or OkHttp | only for the memory | ~130 MB less RSS at 1,024 threads, but +15–36% CPU per request at 64–256 threads and no throughput gain. For Apache, its async client gets the same savings without the CPU cost |
 | OkHttp `enqueue` for concurrency | doesn't save threads | One platform thread per in-flight call (887 at 1,024); with a virtual-thread dispatcher 100 threads, but no faster than blocking calls on virtual threads |
+| Spring `RestClient` | on **Apache 5** (in Spring Boot: add `httpclient5`, which its detection picks first) | +10 µs CPU and +1.8 KB per request, 91% of the raw client's throughput; on the JDK client, Boot's fallback, +396 µs |
+| Spring `WebClient` | on **Reactor Netty** (its default) | +19 µs CPU and +8 KB per request; 87% of raw Reactor Netty when used asynchronously; on JDK or Jetty, 0.50–0.63x |
+| OpenFeign | on **Apache 5** or **OkHttp**; small bodies | +18 µs CPU per request at 1 KB, but it copies the body: +170–280 KB allocated per 100 KB response |
 | Virtual threads on JDK 21 | avoid, or use JDK 24+ | `synchronized` pins the virtual thread to its carrier: deadlock with `jdk-vt`, pinning in OkHttp while opening connections |
 | No dependencies; low volume; CLIs, scripts, internal tools | **JDK** | With network latency and 1–4 threads it is within ~10–20% of the others |
 | Latency-critical path (p99.9) or high volume | avoid **JDK** | Longest tail (p99.9 679 µs, 3.0x its median; p99.99 3.9 ms vs. 0.5–0.7 ms); 2–3x the time and up to 5x the CPU per request |
@@ -73,9 +82,10 @@ scenario 4); CPU per request still does.
 | JVM | OpenJDK 21.0.12 (Zulu); scenarios 5–7 on OpenJDK 25.0.5 (Zulu). Always `-Xms1g -Xmx1g -XX:+AlwaysPreTouch`, G1 |
 | Kernel | Linux 7.0 |
 | Server | nginx 1.30.6 (Docker), keep-alive, gzip off |
-| Clients | JDK `HttpClient` · Apache HttpClient 5.6.5 (classic) · OkHttp 5.5.1 · Jetty 12.1.14 |
-| JMH | 1.37; 3 forks × (10 × 3 s warmup + 5 × 3 s measurement). Scenarios 5–7: 2 forks |
-| Runs | Scenarios 1–5: one `scripts/run-all.sh` run (190 min). Scenarios 6–7: a second run the next day (37 min). No failed benchmark |
+| Clients | JDK `HttpClient` · Apache HttpClient 5.6.5 (classic and async) · OkHttp 5.5.1 · Jetty 12.1.14 · Reactor Netty 1.3.8 |
+| Layers | Spring Framework 7.0.10 (`RestClient`, `WebClient`) · OpenFeign 13.17 (plain, no Spring Cloud) |
+| JMH | 1.37; 3 forks × (10 × 3 s warmup + 5 × 3 s measurement). Scenarios 5–9: 2 forks |
+| Runs | Scenarios 1–5: one `scripts/run-all.sh` run (190 min). Scenarios 6–7: a second run the next day (37 min). Scenarios 8–9: a third run the same day (66 min). No failed benchmark |
 
 Same configuration for every client: HTTP/1.1, pool of 64 connections (1,024 in scenario 5),
 `TCP_NODELAY`, no compression, redirects, retries or cookies, body read fully into a `byte[]`.
@@ -377,6 +387,77 @@ virtual-thread executor · OkHttp, blocking calls on virtual threads.
 
 ---
 
+## Scenarios 8 and 9: Spring and Feign layers (bytes only)
+
+Each layer wraps a client built by the same code as the raw benchmark (`NativeClients`), so the
+configuration is identical, and **each layer runs next to its raw client in the same run**; the
+cost of a layer is measured within that run. (Run-to-run differences for the raw clients reached
+20% for Apache between scenario 1 and this run, and 2–6% for the others, so comparing a layer
+with a raw number from another day would mislead.) The response is read as `byte[]` everywhere,
+so this measures the HTTP abstraction, not JSON conversion. A probe of the requests nginx received
+confirmed that each layer uses the expected library and protocol (HTTP/1.1, no upgrade), and that
+Spring 7's `JdkClientHttpRequestFactory` enables compression by default; it is disabled here, like
+in every other client.
+
+### Scenario 8: cost per request (loopback, 1 thread)
+
+Raw clients at 1 KB: Apache 5 14,370 ops/s (46 µs CPU), Apache 5 async 9,523 (100 µs), JDK 4,309
+(267 µs), Jetty 10,356 (114 µs), OkHttp 10,054 (123 µs), Reactor Netty 9,265 (95 µs).
+
+| Added on top of its raw client | ops/s, 1 KB | + time, 1 KB | **+ CPU, 1 KB** | + alloc, 1 KB | + CPU, 100 KB | + alloc, 100 KB |
+|---|---|---|---|---|---|---|
+| **RestClient on Apache 5** | **13,071** | +7 µs | **+10 µs** | +1.8 KB | −22 µs | +2.9 KB |
+| Feign on Apache 5 | 11,624 | +16 µs | +18 µs | +10.5 KB | +84 µs | +168 KB |
+| WebClient on Apache 5 async | 7,810 | +23 µs | +24 µs | +14.2 KB | +56 µs | +91 KB |
+| Feign on OkHttp | 8,653 | +16 µs | +19 µs | +13.9 KB | +89 µs | +232 KB |
+| **WebClient on Reactor Netty** | 8,042 | +16 µs | **+19 µs** | +8.4 KB | **+26 µs** | **+9.3 KB** |
+| RestClient on Reactor Netty | 7,388 | +27 µs | +36 µs | +22.5 KB | +156 µs | +226 KB |
+| RestClient on Jetty | 8,059 | +28 µs | +29 µs | +5.4 KB | +35 µs | +108 KB |
+| WebClient on Jetty | 7,406 | +39 µs | +46 µs | +14.6 KB | +103 µs | +223 KB |
+| Feign on JDK | 3,331 | +68 µs | +99 µs | +15.8 KB | +212 µs | +280 KB |
+| **RestClient on JDK** | 1,990 | +271 µs | **+396 µs** | +25.5 KB | +539 µs | +128 KB |
+| **WebClient on JDK** | 1,564 (±26.7%) | +408 µs | **+694 µs** | +15.0 KB | +857 µs | +226 KB |
+
+Error below 5% except where shown (WebClient on JDK: ±24–27%; RestClient on Apache 5 at 1 KB: ±9.8%).
+
+1. **The light layers cost 10–20 µs of CPU per request**: RestClient on Apache 5, WebClient on
+   Reactor Netty, Feign on Apache 5 or OkHttp. RestClient on Apache 5 keeps 91% of the raw
+   client's throughput.
+2. **The engine matters more than the layer.** The same RestClient adds 10 µs on Apache 5 and
+   396 µs on the JDK client; every Spring integration with the JDK client is the most expensive
+   option in its group, and WebClient on the JDK client is also unstable. The cause was not
+   investigated.
+3. **Each layer has a natural engine.** RestClient on Apache 5; WebClient on Reactor Netty, which
+   passes large bodies through almost for free (+9 KB at 100 KB). The other way round, RestClient
+   on Reactor Netty adapts the reactive client to a blocking API and copies the body (+226 KB at
+   100 KB).
+4. **Feign copies the body**: +168 to +280 KB allocated per 100 KB response with every client.
+5. At 100 KB, **RestClient on Apache 5 was faster than raw Apache 5** (−22 µs CPU, same
+   allocation). Observed, not explained.
+
+**In Spring Boot**, `RestClient` picks its engine from the classpath in this order: Apache
+HttpClient 5, Jetty, Reactor Netty, JDK `HttpClient`, `HttpURLConnection` (from the bytecode of
+`ClientHttpRequestFactoryBuilder.detect` in Spring Boot 4.0.9). The JDK client is always present, so
+an application with none of the others falls back to the most expensive combination measured
+here; adding `httpclient5` makes it pick the cheapest.
+
+### Scenario 9: WebClient used asynchronously (JDK 25, 20 ms RTT, 1,024 in flight)
+
+Same conditions as scenario 6; `apache5-async` matched scenario 6 again (25,036 vs. 25,071 ops/s).
+
+| Engine | Raw async client | WebClient | WebClient ÷ raw | + CPU per request |
+|---|---|---|---|---|
+| **Reactor Netty** | 24,845 | **21,611** | **0.87x** | +15 µs |
+| Apache 5 async | 25,036 | 20,544 | 0.82x | +17 µs |
+| Jetty | 22,313 | 14,096 (±24.5%) | 0.63x | +57 µs |
+| JDK | 9,935 | 4,985 (±26.3%) | 0.50x | +214 µs |
+
+WebClient on Reactor Netty (its default) or on Apache's async client keeps 82–87% of the raw
+async throughput with the same thread count (10–13 platform threads). On Jetty and the JDK it
+loses 37–50% and becomes unstable.
+
+---
+
 ## Investigation: why OkHttp doesn't scale to many connections
 
 **Question:** why does OkHttp gain nothing from virtual threads and stay 29–37% below Apache at
@@ -477,6 +558,11 @@ They would affect any HTTP client benchmark; recorded for whoever reproduces thi
 - **Virtual-thread CPU overhead for blocking clients.** The poller-handoff explanation fits the
   data but was not profiled.
 - **OkHttp with HTTP/2.** Not tested; the linear pool scan should matter less with multiplexing.
+- **Why are Spring's JDK-client integrations so expensive?** RestClient and WebClient add +396 and
+  +694 µs of CPU per request on the JDK client, against +10 to +46 µs on the other engines, and
+  WebClient on it is unstable. Not profiled.
+- **Layers measured with bytes only.** JSON to object conversion, Spring Cloud OpenFeign and
+  Spring's HTTP Interface are not covered.
 
 ## Result files
 
@@ -491,4 +577,6 @@ All under `results/i7-5500U/`, each JSON with a `.env` describing what was measu
 | 5. Virtual threads | `*-vt-{PLATFORM,VIRTUAL}-t{64,256,1024}.json` |
 | 6. Async APIs | `*-async.json` |
 | 7. Async APIs on virtual threads | `*-async-vt.json` |
+| 8. Spring and Feign layers | `*-layers-t1.json` |
+| 9. WebClient async | `*-layers-async.json` |
 | OkHttp investigation | `*-investigate-shard-{PLATFORM,VIRTUAL}.json` (JFR recordings and thread dumps are not versioned) |
