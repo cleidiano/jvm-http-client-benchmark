@@ -13,13 +13,20 @@
 | `jdk-vt` | same as `jdk` | client's internal executor on virtual threads |
 | `jetty-vt` | same as `jetty` | client's internal pool on virtual threads (`VirtualThreadPool`) |
 | `okhttp-sharded` | same as `okhttp` | experiment: 8 clients/pools (see the OkHttp investigation in RESULTS.md) |
+| `jdk-async` | same as `jdk` | `sendAsync()` → `CompletableFuture` |
+| `apache5-async` | Apache HttpClient 5.6.5 | async client (`CloseableHttpAsyncClient`, non-blocking I/O reactor) |
+| `okhttp-async` | same as `okhttp` | `Call.enqueue()` (blocking I/O on the dispatcher's thread pool) |
+| `jetty-async` | same as `jetty` | `CompletableResponseListener` |
+| `jdk-vt-async` | same as `jdk-async` | internal executor on virtual threads |
+| `jetty-vt-async` | same as `jetty-async` | internal pool on virtual threads (`VirtualThreadPool`) |
+| `okhttp-vt-async` | same as `okhttp-async` | dispatcher runs each call on a virtual thread |
 
-By default the benchmarks run the first four; the other variants are selected with
-`-p client=...` (see scenario 5).
+By default the blocking benchmarks run the first four; the `-vt` variants are selected with
+`-p client=...` (scenario 5), and the `-async` ones are used by `AsyncGetBenchmark` (scenarios 6 and 7).
 
 ## Requirements
 
-- JDK 21 (JDK 24+ for the virtual-thread scenario)
+- JDK 21 (JDK 24+ for scenarios 5, 6 and 7)
 - Linux, Docker (your user in the `docker` group)
 - Optional: `sudo` + `cpupower`, to pin the CPU frequency (`TUNE_CPU=1`)
 
@@ -30,7 +37,7 @@ The build uses the Gradle Wrapper (`./gradlew`); nothing else needs to be instal
 ```
 bench-api/      common contract: BenchClient, ClientConfig, BenchClientProvider (ServiceLoader)
 clients/        one adapter per library
-benchmarks/     GetBenchmark, PostBenchmark, ResourceProfiler (src/jmh)
+benchmarks/     GetBenchmark, PostBenchmark, AsyncGetBenchmark, ResourceProfiler (src/jmh)
 server/nginx/   nginx.conf + payload generation (/bytes/0, /bytes/1k, /bytes/100k, /post)
 server/netem/   helper image with `tc` to simulate network latency
 scripts/        run-all.sh, server.sh, bench.sh, summarize.py, lib/cpu.sh
@@ -72,7 +79,7 @@ scripts/server.sh stop
 
 ## Run everything
 
-`scripts/run-all.sh` runs all five scenarios below in one go (about 3 hours), unattended:
+`scripts/run-all.sh` runs all seven scenarios below in one go (about 4 hours), unattended:
 
 ```bash
 scripts/run-all.sh --quick --no-tune      # ~10 min dry run: checks the whole pipeline here
@@ -288,6 +295,74 @@ client's code (on JDK 21, for example, OkHttp pins in `RealCall.initExchange` wh
 connections). On JDK 24+ `jdk.tracePinnedThreads` no longer exists; use the JFR event
 `jdk.VirtualThreadPinned` instead.
 
+### 6. Async APIs: one thread, many requests in flight
+
+> Can one thread drive 1,024 concurrent requests through a native async API, and how does that
+> compare with 1,024 platform or virtual threads making blocking calls (scenario 5)?
+
+`AsyncGetBenchmark` runs on a single benchmark thread that keeps `inFlight` requests (64, 256,
+1,024) outstanding: a semaphore caps the pending requests and each completion frees a slot. In
+steady state the score is completed requests per second. Failures inside callbacks are rethrown
+on the benchmark thread, so they never pass silently. Same network and JDK as scenario 5.
+
+| Client | Async API | Non-blocking I/O |
+|---|---|---|
+| `jdk-async` | `sendAsync()` | yes |
+| `apache5-async` | `CloseableHttpAsyncClient` (a different client from the classic one) | yes |
+| `jetty-async` | `CompletableResponseListener` | yes |
+| `okhttp-async` | `Call.enqueue()` | no: each in-flight call blocks a dispatcher thread |
+
+```bash
+(
+  set -e
+  export NETWORK=bridge LATENCY=20ms
+  export JAVA=/path/to/jdk-25/bin/java MAX_CONNECTIONS=1024
+  sudo -v
+  scripts/server.sh restart
+  TUNE_CPU=1 LABEL=async scripts/bench.sh AsyncGetBenchmark -t 1 -f 2 \
+    -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
+  scripts/server.sh stop
+)
+```
+
+Time: ~20 min. Check with Little's law: at 64 in flight and ~20.5 ms per request the ceiling is
+~3,100 ops/s; a result above that means something is wrong. `MAX_CONNECTIONS` must be at least the
+largest `inFlight` (the setup refuses to run otherwise). In the `summarize.py` table, `us/op` is
+`inFlight ÷ throughput`, the average time each request takes.
+
+### 7. Async APIs on virtual threads
+
+> Does running the async clients' internal work on virtual threads change throughput, CPU or the
+> number of platform threads?
+
+Scenario 6 again with virtual threads everywhere: the calling thread (`EXECUTOR=VIRTUAL`) and each
+client's internal executor.
+
+| Client | Internal work on virtual threads |
+|---|---|
+| `jdk-vt-async` | `HttpClient.executor(Executors.newVirtualThreadPerTaskExecutor())` |
+| `jetty-vt-async` | `VirtualThreadPool` |
+| `okhttp-vt-async` | `new Dispatcher(Executors.newVirtualThreadPerTaskExecutor())`: each enqueued call still does blocking I/O, but on a virtual thread instead of a platform thread |
+| `apache5-async` | none: its I/O reactor is a non-blocking event loop. It runs as the reference shared with scenario 6 |
+
+```bash
+(
+  set -e
+  export NETWORK=bridge LATENCY=20ms EXECUTOR=VIRTUAL
+  export JAVA=/path/to/jdk-25/bin/java MAX_CONNECTIONS=1024
+  sudo -v
+  scripts/server.sh restart
+  TUNE_CPU=1 LABEL=async-vt scripts/bench.sh AsyncGetBenchmark \
+    -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async -t 1 -f 2 \
+    -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
+  scripts/server.sh stop
+)
+```
+
+Time: ~20 min. Compare each `*-vt-async` client with its `*-async` counterpart from scenario 6;
+`apache5-async` should match across both runs. Needs JDK 24+ for the same pinning reasons as
+scenario 5 (the benchmark refuses `*-vt*` clients with virtual-thread callers on older JDKs).
+
 ## Analyzing results
 
 ```bash
@@ -319,7 +394,7 @@ To publish results, move the files you want from `results/local/` to `results/<m
 | `BENCH_CPUS` | bench.sh | `0,2` | JMH CPUs |
 | `TUNE_CPU` | bench.sh | `0` | `1` pins the CPU frequency during the run (sudo) |
 | `FAIL_ON_ERROR` | bench.sh | `1` | `0` keeps running the remaining benchmarks after one throws (run-all.sh uses it) |
-| `JAVA_VT` | run-all.sh | — | JDK 24+ `java` for scenario 5 |
+| `JAVA_VT` | run-all.sh | — | JDK 24+ `java` for scenarios 5, 6 and 7 |
 | `LABEL` | bench.sh | — | suffix of the results file |
 | `RESULTS_DIR` | bench.sh | `results/local` | where results go (ignored by git) |
 | `JAVA` | bench.sh | `java` on PATH | JDK used for the benchmark |
@@ -358,4 +433,4 @@ Extra arguments to `bench.sh` go straight to JMH:
 - Spring `RestClient` / `WebClient` and Spring Cloud OpenFeign, measuring each layer's cost on
   top of the same client
 - HTTP/2 and TLS
-- Asynchronous client APIs
+- POST and large bodies through the async APIs

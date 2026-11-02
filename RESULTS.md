@@ -24,6 +24,12 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 > **JDK (+30–38%) and Jetty (+39%)**, at 1,024 concurrent requests. For **Apache and OkHttp**,
 > which block on the calling thread, they **cost 15–36% more CPU per request** at moderate
 > concurrency.
+>
+> **Async APIs** (one thread, 1,024 requests in flight): **Apache's async client** matches its
+> classic client's throughput and CPU with **10 platform threads instead of 1,030**. **Jetty's**
+> async API is 45% faster than its blocking API on platform threads. The **JDK** only benefits once
+> its internal executor runs on virtual threads. **OkHttp's** `enqueue` is not non-blocking: it
+> held 887 platform threads for 1,024 requests in flight.
 
 ---
 
@@ -38,9 +44,11 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 | Large uploads | **Apache 5** (or **Jetty**) | Write the `byte[]` straight to the socket: 11 KB and 6 KB allocated per 100 KB POST, vs. 60–122 KB |
 | Moderate concurrency (up to tens of connections), balanced profile; Android/Kotlin ecosystem | **OkHttp** | Stable between runs; matches Apache at 16 threads on loopback (24.2k vs. 23.2k ops/s) |
 | Hundreds or thousands of concurrent HTTP/1.1 requests to the same server | **Apache 5** or **Jetty**; avoid **OkHttp** | With 1,024 connections OkHttp spends 26% of CPU looking for a free connection and reaches 0.63–0.71x Apache's throughput (investigation below) |
-| Virtual threads with the JDK `HttpClient` | **JDK** with a virtual-thread executor | At 1,024 virtual threads: 20.2k ops/s with `.executor(newVirtualThreadPerTaskExecutor())`, vs. 11.7k with the default executor |
-| Virtual threads with Jetty | **Jetty** with its default internal pool | +39% throughput with virtual-thread callers at 1,024 threads |
-| Virtual threads with Apache or OkHttp | only for the memory | ~130 MB less RSS at 1,024 threads, but +15–36% CPU per request at 64–256 threads and no throughput gain |
+| Virtual threads with the JDK `HttpClient` | **JDK** with a virtual-thread executor | At 1,024 virtual threads: 20.2k ops/s with `.executor(newVirtualThreadPerTaskExecutor())`, vs. 11.7k with the default executor. Its async API alone doesn't help (9.8k, like blocking on platform threads) |
+| Thousands of concurrent requests with few threads | **Apache 5 async** (`CloseableHttpAsyncClient`) | 25.1k ops/s at 1,024 in flight with 10 platform threads; same CPU per request as the classic client (80 vs. 85 µs) |
+| Jetty at high concurrency | **Jetty async API**, optionally with `VirtualThreadPool` | +45% over its blocking API on platform threads at 1,024; the virtual-thread pool cuts CPU per request by ~33% at moderate load and threads from 208 to 13 |
+| Virtual threads with Apache or OkHttp | only for the memory | ~130 MB less RSS at 1,024 threads, but +15–36% CPU per request at 64–256 threads and no throughput gain. For Apache, its async client gets the same savings without the CPU cost |
+| OkHttp `enqueue` for concurrency | doesn't save threads | One platform thread per in-flight call (887 at 1,024); with a virtual-thread dispatcher 100 threads, but no faster than blocking calls on virtual threads |
 | Virtual threads on JDK 21 | avoid, or use JDK 24+ | `synchronized` pins the virtual thread to its carrier: deadlock with `jdk-vt`, pinning in OkHttp while opening connections |
 | No dependencies; low volume; CLIs, scripts, internal tools | **JDK** | With network latency and 1–4 threads it is within ~10–20% of the others |
 | Latency-critical path (p99.9) or high volume | avoid **JDK** | Longest tail (p99.9 679 µs, 3.0x its median; p99.99 3.9 ms vs. 0.5–0.7 ms); 2–3x the time and up to 5x the CPU per request |
@@ -62,12 +70,12 @@ scenario 4); CPU per request still does.
 |---|---|
 | CPU | Intel i7-5500U (2 cores / 4 threads). JMH on CPUs 0,2 (one physical core), nginx on CPUs 1,3 |
 | Frequency | Pinned at 2.4 GHz for every scenario (`performance` governor, turbo off) |
-| JVM | OpenJDK 21.0.12 (Zulu); scenario 5 on OpenJDK 25.0.5 (Zulu). Always `-Xms1g -Xmx1g -XX:+AlwaysPreTouch`, G1 |
+| JVM | OpenJDK 21.0.12 (Zulu); scenarios 5–7 on OpenJDK 25.0.5 (Zulu). Always `-Xms1g -Xmx1g -XX:+AlwaysPreTouch`, G1 |
 | Kernel | Linux 7.0 |
 | Server | nginx 1.30.6 (Docker), keep-alive, gzip off |
 | Clients | JDK `HttpClient` · Apache HttpClient 5.6.5 (classic) · OkHttp 5.5.1 · Jetty 12.1.14 |
-| JMH | 1.37; 3 forks × (10 × 3 s warmup + 5 × 3 s measurement). Scenario 5: 2 forks |
-| Run | One `scripts/run-all.sh` run, 190 min, no failed benchmark |
+| JMH | 1.37; 3 forks × (10 × 3 s warmup + 5 × 3 s measurement). Scenarios 5–7: 2 forks |
+| Runs | Scenarios 1–5: one `scripts/run-all.sh` run (190 min). Scenarios 6–7: a second run the next day (37 min). No failed benchmark |
 
 Same configuration for every client: HTTP/1.1, pool of 64 connections (1,024 in scenario 5),
 `TCP_NODELAY`, no compression, redirects, retries or cookies, body read fully into a `byte[]`.
@@ -297,6 +305,78 @@ On JDK 25 there were no pinning events at all (JFR).
 
 ---
 
+## Scenarios 6 and 7: async APIs (JDK 25, 20 ms RTT, GET 1 KB)
+
+A single benchmark thread keeps 64, 256 or 1,024 requests in flight through each client's native
+async API (a semaphore caps the pending requests; each completion frees a slot). Scenario 6 uses
+the clients' default internal threads; scenario 7 runs everything on virtual threads: the
+calling thread and each client's internal executor (JDK executor, Jetty `VirtualThreadPool`,
+OkHttp dispatcher). Same network and JDK as scenario 5.
+
+`apache5-async` has no executor to swap (its I/O reactor is a non-blocking loop) and ran in both
+scenarios as a shared reference: 3,122 / 3,120, 12,529 / 12,545 and 25,071 / 24,664 ops/s, within
+1.6%, so the two runs compare directly.
+
+### 64 and 256 in flight: network-bound
+
+Throughput sits at the network ceiling for everyone (~3.1k and ~12.5k ops/s) except the JDK at
+256 (9.3k / 10.1k), which already saturates the CPU. CPU per request:
+
+| CPU per request | 64, default threads | 64, virtual threads | 256, default threads | 256, virtual threads |
+|---|---|---|---|---|
+| apache5-async | **87 µs** | 93 µs (reference) | **84 µs** | 95 µs (reference) |
+| jetty | 123 µs | **82 µs (−34%)** | 126 µs | **86 µs (−32%)** |
+| jdk | 231 µs | 167 µs (−28%) | 212 µs | 135 µs (−36%) |
+| okhttp | 150 µs | 162 µs (+7%) | 157 µs | 163 µs (+4%) |
+
+With its internal work on virtual threads, **Jetty's async API costs as little CPU as Apache's**.
+OkHttp goes the other way: its dispatcher still runs blocking I/O per call, now on virtual
+threads, which adds the poller handoff seen in scenario 5. The reference's slightly higher CPU in
+scenario 7 comes from its calling thread being virtual there.
+
+### 1,024 in flight: CPU-bound
+
+| | Default threads (scenario 6) | Virtual threads (scenario 7) |
+|---|---|---|
+| **apache5-async** | **25,071 ops/s**, 80 µs CPU, **10 threads** | 24,664 ops/s (reference) |
+| jetty | 21,742, 92 µs, 208 threads | 21,731, 93 µs, **13 threads** |
+| jdk | 9,774 (±16.4%), 207 µs, 166 threads | **17,331**, 116 µs, **12 threads** |
+| okhttp | 13,284, 152 µs, **887 threads**, RSS 1,226 MB | 14,524 (±9.6%), 139 µs, 100 threads, RSS 1,147 MB |
+
+### Four ways to run 1,024 concurrent requests
+
+Throughput (platform threads alive). The blocking columns come from scenario 5, the async ones
+from scenarios 6 and 7; all with the CPU pinned and the same network, but scenario 5 ran on a
+different day, so treat differences below ~5% across columns as ties.
+
+| | Blocking, platform threads | Blocking, virtual threads | Async | Async + virtual threads |
+|---|---|---|---|---|
+| **Apache 5** | 24.3k (1,030) | 22.4k (11) | **25.1k (10)** | — |
+| **Jetty** | 15.0k (1,231) | 20.8k (211) | **21.7k (208)** | **21.7k (13)** |
+| **JDK** | 9.0k (1,183) | **20.2k (11)**\* | 9.8k (166) | 17.3k (12) |
+| **OkHttp** | 15.4k (1,061) | **15.9k (66)** | 13.3k (887) | 14.5k (100) |
+
+\* `jdk-vt`: virtual threads also for the client's internal executor.
+
+1. **Apache's async client is the best combination**: classic-client throughput and CPU with the
+   thread footprint of virtual threads, and without the CPU that virtual threads cost Apache's
+   blocking client (+7 to +29% in scenario 5).
+2. **Jetty gains the most from its async API** (+45% over blocking on platform threads). Its
+   virtual-thread pool adds nothing to throughput at saturation, but cuts threads to 13 and CPU by
+   a third at moderate load.
+3. **For the JDK, the async API alone changes nothing**; the virtual-thread executor is what
+   matters (+77% at 1,024, −28 to −36% CPU). Its best configuration is still blocking calls on
+   virtual threads.
+4. **OkHttp's `enqueue` is one thread per request.** A virtual-thread dispatcher brings the
+   platform threads from 887 to 100 (the rest are its `TaskRunner` pool-cleanup threads), but every
+   model hits the same ~13–16k ceiling set by its linear pool scan (see the investigation below).
+
+**Best model per client at high concurrency:** Apache, async client · Jetty, async API (with
+`VirtualThreadPool` for less CPU and fewer threads) · JDK, blocking calls on virtual threads with a
+virtual-thread executor · OkHttp, blocking calls on virtual threads.
+
+---
+
 ## Investigation: why OkHttp doesn't scale to many connections
 
 **Question:** why does OkHttp gain nothing from virtual threads and stay 29–37% below Apache at
@@ -384,7 +464,9 @@ They would affect any HTTP client benchmark; recorded for whoever reproduces thi
 - **Small machine.** One physical core for the client shows neither lock contention nor scaling
   across many cores. Absolute numbers only hold for this machine; the relative order and the
   split between fixed cost and cost per byte should carry over.
-- **Scope.** HTTP/1.1 only, no TLS, synchronous APIs.
+- **Scope.** HTTP/1.1 only, no TLS, GET only for the async APIs.
+- **Cross-run comparison.** The four-model table mixes scenario 5 with scenarios 6–7, measured on
+  different days; both runs had the CPU pinned, but there is no shared reference between them.
 - **Retained memory not measured.** The unverified hypothesis is that Jetty's low allocation
   comes from buffer pooling, which trades allocation for memory that stays occupied.
 - **GC under pressure not measured.** A scenario with a small heap and live data is missing; that
@@ -407,4 +489,6 @@ All under `results/i7-5500U/`, each JSON with a `.env` describing what was measu
 | 3. Latency distribution | `*-latency-1k.json` |
 | 4. Simulated network | `*-network-500us-t{1,4,16}.json` |
 | 5. Virtual threads | `*-vt-{PLATFORM,VIRTUAL}-t{64,256,1024}.json` |
+| 6. Async APIs | `*-async.json` |
+| 7. Async APIs on virtual threads | `*-async-vt.json` |
 | OkHttp investigation | `*-investigate-shard-{PLATFORM,VIRTUAL}.json` (JFR recordings and thread dumps are not versioned) |

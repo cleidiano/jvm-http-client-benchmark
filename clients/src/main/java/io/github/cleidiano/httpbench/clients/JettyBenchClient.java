@@ -1,17 +1,21 @@
 package io.github.cleidiano.httpbench.clients;
 
+import io.github.cleidiano.httpbench.api.AsyncBenchClient;
 import io.github.cleidiano.httpbench.api.BenchClient;
 import io.github.cleidiano.httpbench.api.BenchClientProvider;
 import io.github.cleidiano.httpbench.api.ClientConfig;
 import io.github.cleidiano.httpbench.api.HttpStatusException;
 import org.eclipse.jetty.client.BytesRequestContent;
+import org.eclipse.jetty.client.CompletableResponseListener;
 import org.eclipse.jetty.client.ContentResponse;
 import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.http.HttpCookieStore;
 import org.eclipse.jetty.util.thread.VirtualThreadPool;
 
+import java.util.concurrent.CompletableFuture;
+
 /** Jetty 12 HttpClient, blocking {@code Request.send()} over HTTP/1.1. */
-public final class JettyBenchClient implements BenchClient {
+public final class JettyBenchClient implements AsyncBenchClient {
 
     private final HttpClient client;
     private final String baseUri;
@@ -52,9 +56,42 @@ public final class JettyBenchClient implements BenchClient {
         return HttpStatusException.check(response.getStatus(), path, response.getContent());
     }
 
+    /** Native async API: a {@link CompletableResponseListener} buffering the content. */
+    @Override
+    public CompletableFuture<byte[]> getAsync(String path) {
+        return new CompletableResponseListener(client.newRequest(baseUri + path)).send()
+                .thenApply(response -> HttpStatusException.check(response.getStatus(), path, response.getContent()));
+    }
+
     @Override
     public void close() throws Exception {
         client.stop();
+    }
+
+    /** Same client, measured through its async API (AsyncGetBenchmark). */
+    public static final class AsyncProvider implements BenchClientProvider {
+        @Override
+        public String name() {
+            return "jetty-async";
+        }
+
+        @Override
+        public BenchClient create(ClientConfig config) throws Exception {
+            return new JettyBenchClient(config, false);
+        }
+    }
+
+    /** Async API with Jetty's internal tasks on its {@link VirtualThreadPool}. */
+    public static final class VirtualThreadsAsyncProvider implements BenchClientProvider {
+        @Override
+        public String name() {
+            return "jetty-vt-async";
+        }
+
+        @Override
+        public BenchClient create(ClientConfig config) throws Exception {
+            return new JettyBenchClient(config, true);
+        }
     }
 
     public static final class Provider implements BenchClientProvider {

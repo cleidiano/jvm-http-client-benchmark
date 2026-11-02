@@ -31,11 +31,15 @@ public class ClientState {
     public void setup() throws Exception {
         verifyExecutor();
         refuseKnownDeadlock(client);
-        var config = new ClientConfig(
+        http = BenchClients.create(client, configFromProperties());
+    }
+
+    /** Client settings from the system properties bench.sh passes to the forked JVM. */
+    static ClientConfig configFromProperties() {
+        return new ClientConfig(
                 System.getProperty("bench.baseUri", "http://127.0.0.1:8080"),
                 Integer.getInteger("bench.maxConnections", 64),
                 Duration.ofSeconds(10));
-        http = BenchClients.create(client, config);
     }
 
     @TearDown(Level.Trial)
@@ -47,12 +51,12 @@ public class ClientState {
      * JMH initializes {@code Scope.Benchmark} state inside {@code synchronized}. Before JDK 24
      * (JEP 491) a virtual thread blocked in or on a monitor pins its carrier, so with
      * EXECUTOR=VIRTUAL every carrier ends up pinned by benchmark threads while a client whose
-     * own work runs on virtual threads ({@code *-vt}) waits for a carrier that never frees up:
+     * own work runs on virtual threads ({@code *-vt*}) waits for a carrier that never frees up:
      * a deadlock, observed with jdk-vt on JDK 21. Fail fast instead of hanging.
      */
-    private static void refuseKnownDeadlock(String client) {
+    static void refuseKnownDeadlock(String client) {
         boolean virtualCallers = System.getProperty("jmh.executor", "PLATFORM").equals("VIRTUAL");
-        if (virtualCallers && client.endsWith("-vt") && Runtime.version().feature() < 24) {
+        if (virtualCallers && client.contains("-vt") && Runtime.version().feature() < 24) {
             throw new IllegalStateException(client + " with EXECUTOR=VIRTUAL deadlocks on JDK "
                     + Runtime.version().feature() + " (synchronized pins virtual threads before JDK 24, "
                     + "and JMH initializes state inside synchronized). Run it on JDK 24+ (JAVA=...).");
@@ -63,7 +67,7 @@ public class ClientState {
      * Setup runs on a benchmark worker thread, so this proves the run really uses the thread
      * kind it claims ({@code -Djmh.executor}, passed by bench.sh as EXECUTOR).
      */
-    private static void verifyExecutor() {
+    static void verifyExecutor() {
         String executor = System.getProperty("jmh.executor", "PLATFORM");
         boolean expectVirtual = executor.equals("VIRTUAL");
         boolean isVirtual = Thread.currentThread().isVirtual();

@@ -4,7 +4,8 @@
     scripts/summarize.py results/*.json
 
 Columns: throughput, error as % of score, min..max iteration, mean time per request
-seen by one thread (threads / throughput), score relative to the best client in the
+seen by one request (concurrency / throughput, where concurrency is the thread count, or
+inFlight for AsyncGetBenchmark), score relative to the best client in the
 scenario, allocation per request (-prof gc), and process CPU time per request, peak live
 platform threads and resident memory (-prof io.github.cleidiano.httpbench.bench.ResourceProfiler).
 For SampleTime runs (-bm sample) it prints p50/p90/p99/p99.9 instead.
@@ -13,7 +14,8 @@ import json
 import sys
 from collections import defaultdict
 
-PREFERRED_ORDER = ["jdk", "jdk-vt", "apache5", "okhttp", "jetty", "jetty-vt"]
+PREFERRED_ORDER = ["apache5", "okhttp", "jetty", "jetty-vt", "jdk", "jdk-vt",
+                   "apache5-async", "okhttp-async", "jetty-async", "jdk-async", "okhttp-sharded"]
 
 
 def client_order(name):
@@ -39,7 +41,9 @@ def summarize(path):
         if mode == "sample":
             print_sample(items)
         else:
-            print_throughput(items, threads)
+            # Async benchmarks keep `inFlight` requests outstanding from one thread.
+            concurrency = int(dict(params).get("inFlight", threads))
+            print_throughput(items, concurrency)
 
 
 def secondary(r, name, scale=1.0, fmt="{:9.0f}", width=9):
@@ -47,9 +51,10 @@ def secondary(r, name, scale=1.0, fmt="{:9.0f}", width=9):
     return fmt.format(score * scale) if score is not None else f"{'-':>{width}}"
 
 
-def print_throughput(items, threads):
+def print_throughput(items, concurrency):
     best = max(r["primaryMetric"]["score"] for _, r in items)
-    print(f"  {'client':10} {'ops/s':>9} {'±err%':>6} {'min..max':>17} {'us/op':>7} {'vs best':>7} "
+    w = max(10, max(len(c) for c, _ in items))
+    print(f"  {'client':{w}} {'ops/s':>9} {'±err%':>6} {'min..max':>17} {'us/op':>7} {'vs best':>7} "
           f"{'B/op':>9} {'cpu us/op':>9} {'threads':>7} {'rss MB':>7}")
     for client, r in items:
         pm = r["primaryMetric"]
@@ -57,8 +62,8 @@ def print_throughput(items, threads):
         # JMH writes "NaN" (a string) when there are too few iterations to compute an error.
         err = pm["scoreError"]
         err_txt = f"{100 * err / pm['score']:5.1f}%" if isinstance(err, (int, float)) else f"{'n/a':>6}"
-        print(f"  {client:10} {pm['score']:9.0f} {err_txt} "
-              f"{min(raw):8.0f}..{max(raw):<8.0f} {threads * 1e6 / pm['score']:7.1f} "
+        print(f"  {client:{w}} {pm['score']:9.0f} {err_txt} "
+              f"{min(raw):8.0f}..{max(raw):<8.0f} {concurrency * 1e6 / pm['score']:7.1f} "
               f"{pm['score'] / best:6.2f}x "
               f"{secondary(r, 'gc.alloc.rate.norm')} "
               f"{secondary(r, 'cpu.time.norm', 1e-3, '{:9.1f}')} "
@@ -69,10 +74,11 @@ def print_throughput(items, threads):
 def print_sample(items):
     unit = items[0][1]["primaryMetric"]["scoreUnit"]
     cols = ["50.0", "90.0", "99.0", "99.9", "100.0"]
-    print(f"  {'client':10} " + " ".join(f"{'p' + c.rstrip('0').rstrip('.'):>9}" for c in cols) + f"  ({unit})")
+    w = max(10, max(len(c) for c, _ in items))
+    print(f"  {'client':{w}} " + " ".join(f"{'p' + c.rstrip('0').rstrip('.'):>9}" for c in cols) + f"  ({unit})")
     for client, r in items:
         pct = r["primaryMetric"]["scorePercentiles"]
-        print(f"  {client:10} " + " ".join(f"{pct[c]:9.1f}" for c in cols))
+        print(f"  {client:{w}} " + " ".join(f"{pct[c]:9.1f}" for c in cols))
 
 
 if __name__ == "__main__":

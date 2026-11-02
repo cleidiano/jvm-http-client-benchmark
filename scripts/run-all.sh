@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every README scenario in one go, unattended. Takes about 3 hours with the defaults.
+# Runs every README scenario in one go, unattended. Takes about 4 hours with the defaults.
 #
 #   scripts/run-all.sh                  # all scenarios
 #   scripts/run-all.sh --only 1,3       # a subset
@@ -8,7 +8,7 @@
 #   scripts/run-all.sh --quick          # minimal iterations (~10 min): checks the whole pipeline
 #                                       # on this machine; the numbers are meaningless
 #
-# Env: JAVA_VT     java binary of a JDK 24+ (required for scenario 5, virtual threads)
+# Env: JAVA_VT     java binary of a JDK 24+ (required for scenarios 5, 6 and 7)
 #      BENCH_CPUS / SERVER_CPUS / JAVA  as in bench.sh and server.sh; every other bench.sh or
 #      server.sh variable in your shell is ignored, since each scenario sets its own
 #
@@ -33,15 +33,17 @@ source scripts/lib/cpu.sh
 unset NETWORK LATENCY EXECUTOR PIN_TRACE BASE_URI MAX_CONNECTIONS TUNE_CPU FAIL_ON_ERROR LABEL RESULTS_DIR
 
 PROFILER=io.github.cleidiano.httpbench.bench.ResourceProfiler
-ALL_SCENARIOS=(1 2 3 4 5)
+ALL_SCENARIOS=(1 2 3 4 5 6 7)
 declare -A TITLE=(
   [1]="Cost per request (loopback, 1 thread)"
   [2]="Concurrency on loopback (4 and 16 threads)"
   [3]="Latency distribution (loopback, percentiles)"
   [4]="Simulated network (bridge + 500us RTT)"
   [5]="Virtual threads vs platform threads (JDK 24+, 20ms RTT)"
+  [6]="Async APIs, one calling thread (JDK 24+, 20ms RTT)"
+  [7]="Async APIs on virtual threads (JDK 24+, 20ms RTT)"
 )
-declare -A MINUTES=([1]=48 [2]=39 [3]=10 [4]=29 [5]=60)
+declare -A MINUTES=([1]=48 [2]=39 [3]=10 [4]=29 [5]=60 [6]=20 [7]=20)
 
 # --- arguments ---------------------------------------------------------------------------------
 
@@ -86,8 +88,8 @@ for tool in docker curl taskset python3; do
 done
 docker info >/dev/null 2>&1 || die "docker is not usable by this user"
 
-if [[ " ${selected[*]} " == *" 5 "* ]]; then
-  [[ -n ${JAVA_VT:-} ]] || die "scenario 5 needs JAVA_VT=/path/to/jdk-24+/bin/java (or use --only without 5)"
+if [[ " ${selected[*]} " == *" 5 "* || " ${selected[*]} " == *" 6 "* || " ${selected[*]} " == *" 7 "* ]]; then
+  [[ -n ${JAVA_VT:-} ]] || die "scenarios 5-7 need JAVA_VT=/path/to/jdk-24+/bin/java (or use --only without them)"
   vt_feature=$("$JAVA_VT" -XshowSettings:properties -version 2>&1 \
     | awk -F'= ' '/java.specification.version/ {print $2}')
   [[ ${vt_feature:-0} -ge 24 ]] || die "JAVA_VT must be JDK 24+ (got '${vt_feature:-unknown}')"
@@ -135,13 +137,13 @@ fi
 # --- helpers ------------------------------------------------------------------------------------
 
 # JMH rejects repeated options, so quick mode replaces the run-length options instead of
-# appending to them: scenarios put their own -f in FORKS_* and never pass -wi/-i/-w/-r.
+# appending to them: scenarios put their own -f in FORKS_2 and never pass -wi/-i/-w/-r.
 if [[ $quick == 1 ]]; then
   QUICK_ARGS=(-f 1 -wi 1 -w 1s -i 1 -r 1s)
-  FORKS_SCENARIO_5=()
+  FORKS_2=()
 else
   QUICK_ARGS=()
-  FORKS_SCENARIO_5=(-f 2)
+  FORKS_2=(-f 2)
 fi
 
 # bench <label> <bench.sh args...>: one bench.sh run, logged to logs/<label>.log.
@@ -203,10 +205,28 @@ scenario_5() {
     for t in 64 256 1024; do
       export EXECUTOR=$executor
       bench "vt-$executor-t$t" GetBenchmark -p payload=1k \
-        -p client=jdk,jdk-vt,apache5,okhttp,jetty,jetty-vt -t "$t" "${FORKS_SCENARIO_5[@]}" \
+        -p client=jdk,jdk-vt,apache5,okhttp,jetty,jetty-vt -t "$t" "${FORKS_2[@]}" \
         -prof gc -prof "$PROFILER"
     done
   done
+}
+
+# Same conditions as scenario 5, so 1 thread with N requests in flight compares directly with
+# N platform or virtual threads making blocking calls.
+scenario_6() {
+  export NETWORK=bridge LATENCY=20ms JAVA=$JAVA_VT MAX_CONNECTIONS=1024
+  server 6
+  bench async AsyncGetBenchmark -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
+}
+
+# Scenario 6 again with virtual threads everywhere: the calling thread and the clients' internal
+# executors (JDK executor, Jetty pool, OkHttp dispatcher). apache5-async has no such executor (its
+# I/O reactor is a non-blocking loop) and runs as the reference shared with scenario 6.
+scenario_7() {
+  export NETWORK=bridge LATENCY=20ms JAVA=$JAVA_VT MAX_CONNECTIONS=1024 EXECUTOR=VIRTUAL
+  server 7
+  bench async-vt AsyncGetBenchmark -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async \
+    -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
 }
 
 # --- run ----------------------------------------------------------------------------------------
