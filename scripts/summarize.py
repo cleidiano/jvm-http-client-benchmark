@@ -5,7 +5,7 @@
 
 Columns: throughput, error as % of score, min..max iteration, mean time per request
 seen by one request (concurrency / throughput, where concurrency is the thread count, or
-inFlight for AsyncGetBenchmark), score relative to the best client in the
+inFlight for GetAsyncBenchmark), score relative to the best client in the
 scenario, allocation per request (-prof gc), and process CPU time per request, peak live
 platform threads and resident memory (-prof io.github.cleidiano.httpbench.bench.ResourceProfiler).
 For SampleTime runs (-bm sample) it prints p50/p90/p99/p99.9 instead.

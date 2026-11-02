@@ -1,7 +1,7 @@
 [
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -321,7 +321,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -649,7 +649,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -977,7 +977,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -1297,7 +1297,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -1622,7 +1622,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -1950,7 +1950,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -2270,7 +2270,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -2596,7 +2596,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -2924,7 +2924,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -3244,7 +3244,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,
@@ -3566,7 +3566,7 @@
     },
     {
         "jmhVersion" : "1.37",
-        "benchmark" : "io.github.cleidiano.httpbench.bench.AsyncGetBenchmark.get",
+        "benchmark" : "io.github.cleidiano.httpbench.bench.GetAsyncBenchmark.get",
         "mode" : "thrpt",
         "threads" : 1,
         "forks" : 2,

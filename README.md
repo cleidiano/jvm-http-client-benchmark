@@ -22,7 +22,7 @@
 | `okhttp-vt-async` | same as `okhttp-async` | dispatcher runs each call on a virtual thread |
 
 By default the blocking benchmarks run the first four; the `-vt` variants are selected with
-`-p client=...` (scenario 5), and the `-async` ones are used by `AsyncGetBenchmark` (scenarios 6 and 7).
+`-p client=...` (scenario 5), and the `-async` ones are used by `GetAsyncBenchmark` (scenarios 6 and 7).
 
 ## Requirements
 
@@ -37,7 +37,7 @@ The build uses the Gradle Wrapper (`./gradlew`); nothing else needs to be instal
 ```
 bench-api/      common contract: BenchClient, ClientConfig, BenchClientProvider (ServiceLoader)
 clients/        one adapter per library
-benchmarks/     GetBenchmark, PostBenchmark, AsyncGetBenchmark, ResourceProfiler (src/jmh)
+benchmarks/     GetBenchmark, PostBenchmark, GetAsyncBenchmark, ResourceProfiler (src/jmh)
 server/nginx/   nginx.conf + payload generation (/bytes/0, /bytes/1k, /bytes/100k, /post)
 server/netem/   helper image with `tc` to simulate network latency
 scripts/        run-all.sh, server.sh, bench.sh, summarize.py, lib/cpu.sh
@@ -73,7 +73,7 @@ from, where CPUs 0 and 2 are the two hyperthreads of core 0. Check your topology
 ```bash
 ./gradlew :benchmarks:jmhJar                  # build (bench.sh also does this)
 scripts/server.sh restart                     # nginx on loopback
-scripts/bench.sh -f 1 -wi 1 -w 1s -i 1 -r 1s  # smoke test (~2 min): only validates, ignore the numbers
+scripts/bench.sh '(Get|Post)Benchmark' -f 1 -wi 1 -w 1s -i 1 -r 1s  # smoke test (~2 min): only validates, ignore the numbers
 scripts/server.sh stop
 ```
 
@@ -139,7 +139,7 @@ the client's (and the kernel's) cost. `-prof gc` adds bytes allocated per reques
   export NETWORK=host LATENCY=
   sudo -v
   scripts/server.sh restart
-  TUNE_CPU=1 LABEL=cost-t1 scripts/bench.sh -t 1 -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
+  TUNE_CPU=1 LABEL=cost-t1 scripts/bench.sh '(Get|Post)Benchmark' -t 1 -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
   scripts/server.sh stop
 )
 ```
@@ -300,7 +300,7 @@ connections). On JDK 24+ `jdk.tracePinnedThreads` no longer exists; use the JFR 
 > Can one thread drive 1,024 concurrent requests through a native async API, and how does that
 > compare with 1,024 platform or virtual threads making blocking calls (scenario 5)?
 
-`AsyncGetBenchmark` runs on a single benchmark thread that keeps `inFlight` requests (64, 256,
+`GetAsyncBenchmark` runs on a single benchmark thread that keeps `inFlight` requests (64, 256,
 1,024) outstanding: a semaphore caps the pending requests and each completion frees a slot. In
 steady state the score is completed requests per second. Failures inside callbacks are rethrown
 on the benchmark thread, so they never pass silently. Same network and JDK as scenario 5.
@@ -319,7 +319,7 @@ on the benchmark thread, so they never pass silently. Same network and JDK as sc
   export JAVA=/path/to/jdk-25/bin/java MAX_CONNECTIONS=1024
   sudo -v
   scripts/server.sh restart
-  TUNE_CPU=1 LABEL=async scripts/bench.sh AsyncGetBenchmark -t 1 -f 2 \
+  TUNE_CPU=1 LABEL=async scripts/bench.sh GetAsyncBenchmark -t 1 -f 2 \
     -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
   scripts/server.sh stop
 )
@@ -352,7 +352,7 @@ client's internal executor.
   export JAVA=/path/to/jdk-25/bin/java MAX_CONNECTIONS=1024
   sudo -v
   scripts/server.sh restart
-  TUNE_CPU=1 LABEL=async-vt scripts/bench.sh AsyncGetBenchmark \
+  TUNE_CPU=1 LABEL=async-vt scripts/bench.sh GetAsyncBenchmark \
     -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async -t 1 -f 2 \
     -prof gc -prof io.github.cleidiano.httpbench.bench.ResourceProfiler
   scripts/server.sh stop
@@ -407,7 +407,7 @@ Extra arguments to `bench.sh` go straight to JMH:
 
 | JMH flag | Example | Effect |
 |---|---|---|
-| filter (regex) | `GetBenchmark` | runs only that benchmark |
+| filter (regex) | `GetBenchmark` | runs the benchmarks whose name matches; without a filter JMH runs all of them, including `GetAsyncBenchmark`, which needs `MAX_CONNECTIONS` ≥ its `inFlight` |
 | `-p` | `-p client=jdk,okhttp -p payload=1k` | restricts parameters |
 | `-t` | `-t 4` | threads |
 | `-bm` / `-tu` | `-bm sample -tu us` | mode and unit |

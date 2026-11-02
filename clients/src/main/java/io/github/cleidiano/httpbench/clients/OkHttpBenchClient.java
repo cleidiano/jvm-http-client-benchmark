@@ -157,7 +157,7 @@ public final class OkHttpBenchClient implements AsyncBenchClient {
         }
     }
 
-    /** Same client, measured through {@code Call.enqueue} (AsyncGetBenchmark). */
+    /** Same client, measured through {@code Call.enqueue} (GetAsyncBenchmark). */
     public static final class AsyncProvider implements BenchClientProvider {
         @Override
         public String name() {

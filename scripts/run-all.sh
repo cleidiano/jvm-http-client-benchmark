@@ -174,7 +174,7 @@ server() {
 scenario_1() {
   export NETWORK=host LATENCY=
   server 1
-  bench cost-t1 -t 1 -prof gc -prof "$PROFILER"
+  bench cost-t1 '(Get|Post)Benchmark' -t 1 -prof gc -prof "$PROFILER"
 }
 
 scenario_2() {
@@ -216,7 +216,7 @@ scenario_5() {
 scenario_6() {
   export NETWORK=bridge LATENCY=20ms JAVA=$JAVA_VT MAX_CONNECTIONS=1024
   server 6
-  bench async AsyncGetBenchmark -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
+  bench async GetAsyncBenchmark -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
 }
 
 # Scenario 6 again with virtual threads everywhere: the calling thread and the clients' internal
@@ -225,7 +225,7 @@ scenario_6() {
 scenario_7() {
   export NETWORK=bridge LATENCY=20ms JAVA=$JAVA_VT MAX_CONNECTIONS=1024 EXECUTOR=VIRTUAL
   server 7
-  bench async-vt AsyncGetBenchmark -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async \
+  bench async-vt GetAsyncBenchmark -p client=apache5-async,jdk-vt-async,jetty-vt-async,okhttp-vt-async \
     -t 1 "${FORKS_2[@]}" -prof gc -prof "$PROFILER"
 }
 

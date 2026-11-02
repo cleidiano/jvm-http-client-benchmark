@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the JMH fat jar and run it pinned to the benchmark CPUs. Extra args go straight to JMH.
 #
-#   scripts/bench.sh                                  # everything, defaults from annotations
+#   scripts/bench.sh '(Get|Post)Benchmark'                # blocking GET and POST, defaults from annotations
 #   scripts/bench.sh GetBenchmark -p client=jdk,okhttp -t 8
 #   scripts/bench.sh GetBenchmark -bm sample -tu us   # latency distribution
-#   scripts/bench.sh -prof gc                         # + allocation per request
+#   scripts/bench.sh GetBenchmark -prof gc            # + allocation per request
 #
 # Before measuring, the running server must match NETWORK/LATENCY (same variables and
 # defaults as scripts/server.sh: host, no latency); otherwise the run aborts. Export them

@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * benchmark thread, so failures never pass silently.
  */
 @State(Scope.Benchmark)
-public class AsyncGetBenchmark extends BenchmarkDefaults {
+public class GetAsyncBenchmark extends BenchmarkDefaults {
 
     /** Scenario 6 uses these; scenario 7 selects the {@code *-vt-async} variants with {@code -p client=}. */
     @Param({"jdk-async", "apache5-async", "okhttp-async", "jetty-async"})

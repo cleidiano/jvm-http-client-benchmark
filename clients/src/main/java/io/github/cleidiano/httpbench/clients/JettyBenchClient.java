@@ -68,7 +68,7 @@ public final class JettyBenchClient implements AsyncBenchClient {
         client.stop();
     }
 
-    /** Same client, measured through its async API (AsyncGetBenchmark). */
+    /** Same client, measured through its async API (GetAsyncBenchmark). */
     public static final class AsyncProvider implements BenchClientProvider {
         @Override
         public String name() {

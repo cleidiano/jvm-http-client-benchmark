@@ -89,7 +89,7 @@ public final class JdkBenchClient implements AsyncBenchClient {
         }
     }
 
-    /** Same client, measured through {@code sendAsync} (AsyncGetBenchmark). */
+    /** Same client, measured through {@code sendAsync} (GetAsyncBenchmark). */
     public static final class AsyncProvider implements BenchClientProvider {
         @Override
         public String name() {
