@@ -8,12 +8,12 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 > over to other hardware is the relative order and the shape of the costs (fixed cost vs. cost
 > per byte, network-bound vs. CPU-bound).
 
-> **Summary:** **Apache HttpClient 5** has the lowest cost per request (2.5–5x less CPU than the
+> **Summary:** **Apache HttpClient 5** has the lowest cost per request (2.1–5.9x less CPU than the
 > others on small requests) and the highest throughput when the CPU is the bottleneck. **Jetty**
-> allocates 2 to 20 times less memory, triggers the fewest GCs and has the lowest cost per byte.
+> allocates 1.4 to 20 times less memory, triggers the fewest GCs and has the lowest cost per byte.
 > **OkHttp** is balanced and stable at moderate concurrency but degrades with hundreds of
 > connections, because finding a free connection scans the whole pool on every request. The
-> **JDK HttpClient** spends 2–3x the time and up to 5x the CPU of Apache per request and has the
+> **JDK HttpClient** spends 1.6–3x the time and 2.9–5.9x the CPU of Apache per request and has the
 > longest latency tail.
 >
 > With real network latency and moderate concurrency, Apache, OkHttp and Jetty reach the same
@@ -43,7 +43,7 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 
 | Situation | Choice | Evidence |
 |---|---|---|
-| Many small calls (JSON APIs, microservices) with the CPU as the bottleneck | **Apache 5** | Lowest cost per request: 39 µs of CPU vs. 97–202 µs (GET 0 B); 1.6–3.8x the throughput at 4 threads |
+| Many small calls (JSON APIs, microservices) with the CPU as the bottleneck | **Apache 5** | Lowest cost per request: 39 µs of CPU vs. 97–202 µs (GET 0 B); 1.6–3.8x the throughput at 4 threads (GET 0 B) |
 | Container with little CPU (e.g. 0.5–1 vCPU) | **Apache 5**, then **OkHttp** | Lowest CPU per request with and without network latency; with the CPU saturated, the loopback ranking returns even with latency (scenario 4, 16 threads) |
 | Small heap or sensitive to GC pauses; large responses | **Jetty** | 4.6 KB/request vs. 10–18 KB; 3 collections vs. 6–15; allocates ~1x the body on downloads |
 | Large downloads | **Jetty** or **Apache 5** | Tie at 1 thread (183 µs each); Jetty allocates half as much |
@@ -57,10 +57,10 @@ reproduce: see the [README](README.md) (`scripts/run-all.sh` runs every scenario
 | OkHttp `enqueue` for concurrency | doesn't save threads | One platform thread per in-flight call (887 at 1,024); with a virtual-thread dispatcher 100 threads, but no faster than blocking calls on virtual threads |
 | Spring `RestClient` | on **Apache 5** (in Spring Boot: add `httpclient5`, which its detection picks first) | +10 µs CPU and +1.8 KB per request, 91% of the raw client's throughput; on the JDK client, Boot's fallback, +396 µs |
 | Spring `WebClient` | on **Reactor Netty** (its default) | +19 µs CPU and +8 KB per request; 87% of raw Reactor Netty when used asynchronously; on JDK or Jetty, 0.50–0.63x |
-| OpenFeign | on **Apache 5** or **OkHttp**; small bodies | +18 µs CPU per request at 1 KB, but it copies the body: +170–280 KB allocated per 100 KB response |
+| OpenFeign | on **Apache 5** or **OkHttp**; small bodies | +18 µs CPU per request at 1 KB, but it copies the body: +168–280 KB allocated per 100 KB response |
 | Virtual threads on JDK 21 | avoid, or use JDK 24+ | `synchronized` pins the virtual thread to its carrier: deadlock with `jdk-vt`, pinning in OkHttp while opening connections |
 | No dependencies; low volume; CLIs, scripts, internal tools | **JDK** | With network latency and 1–4 threads it is within ~10–20% of the others |
-| Latency-critical path (p99.9) or high volume | avoid **JDK** | Longest tail (p99.9 679 µs, 3.0x its median; p99.99 3.9 ms vs. 0.5–0.7 ms); 2–3x the time and up to 5x the CPU per request |
+| Latency-critical path (p99.9) or high volume | avoid **JDK** | Longest tail (p99.9 679 µs, 3.0x its median; p99.99 3.9 ms vs. 0.5–0.7 ms); 1.6–3x the time and 2.9–5.9x the CPU of Apache per request |
 
 **Performance is only one criterion.** Features and ecosystem may weigh more:
 - **JDK:** zero dependencies, built-in HTTP/2.
@@ -79,7 +79,7 @@ scenario 4); CPU per request still does.
 |---|---|
 | CPU | Intel i7-5500U (2 cores / 4 threads). JMH on CPUs 0,2 (one physical core), nginx on CPUs 1,3 |
 | Frequency | Pinned at 2.4 GHz for every scenario (`performance` governor, turbo off) |
-| JVM | OpenJDK 21.0.12 (Zulu); scenarios 5–7 on OpenJDK 25.0.5 (Zulu). Always `-Xms1g -Xmx1g -XX:+AlwaysPreTouch`, G1 |
+| JVM | OpenJDK 21.0.12 (Zulu); scenarios 5–7 and 9 on OpenJDK 25.0.5 (Zulu). Always `-Xms1g -Xmx1g -XX:+AlwaysPreTouch`, G1 |
 | Kernel | Linux 7.0 |
 | Server | nginx 1.30.6 (Docker), keep-alive, gzip off |
 | Clients | JDK `HttpClient` · Apache HttpClient 5.6.5 (classic and async) · OkHttp 5.5.1 · Jetty 12.1.14 · Reactor Netty 1.3.8 |
@@ -130,7 +130,7 @@ spend more CPU per request than wall-clock time, so part of the work runs in par
 internal threads (selector and executor in Jetty and the JDK; for OkHttp the likely candidate,
 not verified, is the pool-cleanup task scheduled on its `TaskRunner` threads every time a
 connection is released). Apache uses no extra thread and stays at 0.64 CPU. In CPU, the gap is
-much wider than in time: **2.5x (OkHttp) to 5x (JDK)** on small requests.
+much wider than in time: **2.1–3.2x (OkHttp, Jetty) to 4.8–5.9x (JDK)** on small requests.
 
 ### Fixed cost vs. cost per byte (time)
 
@@ -157,7 +157,8 @@ much wider than in time: **2.5x (OkHttp) to 5x (JDK)** on small requests.
 
 Collections add up the 3 forks (45 s of measurement in total).
 
-- **Per request**, Jetty allocates 2.3–3.9x less than the others on small requests, and
+- **Per request**, Jetty allocates 2.3–3.9x less than the others on GET 0 B (1.7–3.4x on 1 KB
+  GET and POST), and
   practically only the body on large responses. Apache and the JDK allocate twice the body (a
   buffer that grows and gets copied).
 - **Per second**, Apache allocates the most, precisely because it serves more requests: 15
@@ -255,8 +256,10 @@ CPU. Pool of up to 1,024 connections.
 
 ### 64 and 256 threads: network-bound
 
-Every client reaches the network ceiling (~3.1k and ~10–12.6k ops/s) with both thread kinds:
-**virtual threads don't change throughput** here. They change what the throughput costs:
+Every client reaches the network ceiling (~3.1k and ~12.5k ops/s) with both thread kinds, except
+`jdk` and `jdk-vt` at 256 threads, which already saturate the CPU (10.1–11.7k ops/s; there virtual
+threads give `jdk` +7%). Otherwise **virtual threads don't change throughput** here. They change
+what the throughput costs:
 
 | CPU per request, PT → VT | 64 threads | 256 threads | Platform threads alive at 256 (PT → VT) | RSS at 256 |
 |---|---|---|---|---|
@@ -330,7 +333,8 @@ scenarios as a shared reference: 3,122 / 3,120, 12,529 / 12,545 and 25,071 / 24,
 ### 64 and 256 in flight: network-bound
 
 Throughput sits at the network ceiling for everyone (~3.1k and ~12.5k ops/s) except the JDK at
-256 (9.3k / 10.1k), which already saturates the CPU. CPU per request:
+256 (9.3k / 10.1k), which already saturates the CPU, and OkHttp on virtual threads at 256 (11.7k).
+CPU per request:
 
 | CPU per request | 64, default threads | 64, virtual threads | 256, default threads | 256, virtual threads |
 |---|---|---|---|---|
@@ -500,7 +504,8 @@ created while others were blocked.
 | apache5 | 25,356 | 26,382 |
 | apache5 ÷ okhttp-sharded | 1.24x | 1.26x |
 
-The min..max ranges don't overlap. With the pool split, the gap to Apache drops to ~1.25x,
+The min..max ranges don't overlap (3 iterations per client; with 1 fork, JMH's error interval is
+too wide to use). With the pool split, the gap to Apache drops to ~1.25x,
 the same as in scenario 1 at 1 thread and 1 KB (1.25x). In other words: without the lookup cost,
 OkHttp is back to its normal per-request disadvantage, without the extra degradation at high
 concurrency.
