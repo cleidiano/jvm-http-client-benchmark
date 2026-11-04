@@ -13,7 +13,8 @@
 #      server.sh variable in your shell is ignored, since each scenario sets its own
 #
 # Everything goes to results/local/run-<timestamp>/: one JSON + .env per step, a log per step,
-# run-all.log (this output) and summary.txt (scripts/summarize.py over all the JSON files).
+# run-all.log (this output), versions.txt (commit, JDKs, library versions) and REPORT.md
+# (scripts/results.py report). The folder is a result set: publish it under results/<machine>/.
 #
 # Behaviour on failures: a step whose benchmarks throw keeps the results of the clients that
 # worked (FAIL_ON_ERROR=0) and is reported as a warning; a scenario that cannot run at all
@@ -115,6 +116,15 @@ mkdir -p "$RUN_DIR/logs"
 export RESULTS_DIR=$RUN_DIR
 exec > >(tee -a "$RUN_DIR/run-all.log") 2>&1
 echo "run directory: $RUN_DIR"
+
+# What this result set measures, so two sets can be compared (scripts/results.py compare).
+{
+  echo "# What this result set measured. Library versions from gradle/libs.versions.toml."
+  echo "commit=$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- . ':!results' || echo -dirty)"
+  echo "java=$("${JAVA:-java}" -version 2>&1 | head -1)"
+  [[ -n ${JAVA_VT:-} ]] && echo "java_vt=$("$JAVA_VT" -version 2>&1 | head -1)"
+  awk '/^\[versions\]/ { f = 1; next } /^\[/ { f = 0 } f && /=/ { gsub(/[ "]/, ""); print }' gradle/libs.versions.toml
+} > "$RUN_DIR/versions.txt"
 
 # --- CPU pinning for the whole run, restored on any exit -----------------------------------------
 
@@ -281,6 +291,7 @@ shopt -s nullglob
 jsons=("$RUN_DIR"/*.json)
 if [[ ${#jsons[@]} -gt 0 ]]; then
   python3 -I scripts/summarize.py "${jsons[@]}" > "$RUN_DIR/summary.txt" 2>&1
+  python3 -I scripts/results.py report "$RUN_DIR" > "$RUN_DIR/REPORT.md" 2>&1
 fi
 
 echo
@@ -294,5 +305,5 @@ if [[ -f $RUN_DIR/warnings ]]; then
   echo "  steps with failed benchmarks (other clients kept): $(paste -sd' ' "$RUN_DIR/warnings")"
   failed=1
 fi
-echo "  results: $RUN_DIR (summary: $RUN_DIR/summary.txt)"
+echo "  results: $RUN_DIR (report: $RUN_DIR/REPORT.md)"
 exit "$failed"

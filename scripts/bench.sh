@@ -15,7 +15,7 @@
 #      BENCH_CPUS  (default 0,2)  MAX_CONNECTIONS (default 64)
 #      LABEL       suffix for the results file: <RESULTS_DIR>/<timestamp>-<LABEL>.json
 #      RESULTS_DIR where results go (default results/local, ignored by git); curated results
-#                  are committed under results/<machine>/
+#                  are published as result sets under results/<machine>/<set>/ (see README)
 #      JAVA        java binary to run the benchmarks with (default: `java` on PATH); JMH forks use it too
 #      EXECUTOR    PLATFORM (default) or VIRTUAL: run JMH benchmark threads as virtual threads
 #                  (-Djmh.executor); the benchmark setup aborts if the threads are not of that kind
@@ -115,6 +115,7 @@ no_turbo=$(current_no_turbo)
 cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)
 java=$("$JAVA" -version 2>&1 | head -1)
 kernel=$(uname -r)
+commit=$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD -- . ':!results' 2>/dev/null || echo -dirty)
 EOF
 fi
 

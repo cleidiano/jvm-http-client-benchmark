@@ -17,7 +17,7 @@ from collections import defaultdict
 # Each layer right below the raw client it wraps; raw clients keep their usual relative order.
 PREFERRED_ORDER = [
     "apache5", "spring-restclient-apache5", "feign-apache5",
-    "okhttp", "feign-okhttp", "okhttp-sharded",
+    "okhttp", "feign-okhttp",
     "jetty", "jetty-vt", "spring-restclient-jetty", "spring-webclient-jetty",
     "jdk", "jdk-vt", "spring-restclient-jdk", "spring-webclient-jdk", "feign-jdk",
     "reactor", "spring-restclient-reactor", "spring-webclient-reactor",

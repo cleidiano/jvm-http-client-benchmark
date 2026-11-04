@@ -2,7 +2,10 @@
 
 [JMH](https://github.com/openjdk/jmh) benchmarks comparing Java HTTP clients against nginx running in Docker.
 
-**Results and when to pick each client: [RESULTS.md](RESULTS.md).**
+An experimentation project: each library version bump gets its own result set, so versions can
+be compared and regressions caught (see [Results and regressions](#results-and-regressions)).
+
+**Conclusions and when to pick each client: [RESULTS.md](RESULTS.md).**
 
 | Client | Version | API used |
 |---|---|---|
@@ -12,7 +15,6 @@
 | `jetty` | Jetty HttpClient 12.1.14 | `Request.send()` |
 | `jdk-vt` | same as `jdk` | client's internal executor on virtual threads |
 | `jetty-vt` | same as `jetty` | client's internal pool on virtual threads (`VirtualThreadPool`) |
-| `okhttp-sharded` | same as `okhttp` | experiment: 8 clients/pools (see the OkHttp investigation in RESULTS.md) |
 | `jdk-async` | same as `jdk` | `sendAsync()` → `CompletableFuture` |
 | `apache5-async` | Apache HttpClient 5.6.5 | async client (`CloseableHttpAsyncClient`, non-blocking I/O reactor) |
 | `okhttp-async` | same as `okhttp` | `Call.enqueue()` (blocking I/O on the dispatcher's thread pool) |
@@ -54,8 +56,8 @@ clients-abstractions/  Spring RestClient and WebClient, OpenFeign, on top of Nat
 benchmarks/     GetBenchmark, PostBenchmark, GetAsyncBenchmark, ResourceProfiler (src/jmh)
 server/nginx/   nginx.conf + payload generation (/bytes/0, /bytes/1k, /bytes/100k, /post)
 server/netem/   helper image with `tc` to simulate network latency
-scripts/        run-all.sh, server.sh, bench.sh, summarize.py, lib/cpu.sh
-results/        curated JMH results, one folder per machine (local runs go to results/local/)
+scripts/        run-all.sh, server.sh, bench.sh, results.py, summarize.py, lib/cpu.sh
+results/        published result sets and investigations (local runs go to results/local/)
 ```
 
 ## How the clients are configured (same for all)
@@ -107,8 +109,9 @@ JAVA_VT=/path/to/jdk-25/bin/java scripts/run-all.sh   # the real thing
 - **A benchmark that throws doesn't lose the others**: the clients that worked are kept and the
   step is reported as a warning. A scenario that cannot run at all is reported as failed and the
   next one starts.
-- **Writes everything to `results/local/run-<timestamp>/`**: JSON + `.env` per step, a log per
-  step, `run-all.log` and `summary.txt`.
+- **Writes a result set to `results/local/run-<timestamp>/`**: JSON + `.env` per step,
+  `versions.txt`, `REPORT.md`, a log per step and `run-all.log` (see
+  [Results and regressions](#results-and-regressions)).
 - `--only 1,3` runs a subset; `--list` shows the plan.
 
 Keep the machine otherwise idle, and run it inside tmux/screen (or `nohup`) so that closing the
@@ -429,26 +432,70 @@ Same conditions as scenario 6, at 1,024 requests in flight from one thread.
 
 Time: ~15 min.
 
-## Analyzing results
+## Results and regressions
 
-```bash
-scripts/summarize.py results/local/*-cost-t1.json      # one table per scenario
+Results are never overwritten. A **result set** is one folder per machine and set of versions:
+
+```
+results/
+  <machine>/
+    <date>-<what changed>/        a result set, e.g. 2026-11-01-baseline, 2026-12-05-okhttp-5.6.0
+      versions.txt                commit, JDKs, every version in gradle/libs.versions.toml
+      REPORT.md                   generated tables, one section per scope (no prose)
+      COMPARE-<previous set>.md   generated diff against the previous set
+      *.json, *.env               raw JMH output and what each run measured
+    investigations/
+      <date>-<topic>/             one-off studies: README.md (question, evidence, answer) + JSON
+RESULTS.md                        index of the sets + current conclusions, kept short
 ```
 
-The table shows ops/s, error, min and max iteration, µs per request, the ratio to the best
-client, bytes allocated per request and, with `ResourceProfiler`, CPU per request, platform
-threads and resident memory. For `-bm sample` runs it shows p50, p90, p99, p99.9 and the max.
+| Scope in `REPORT.md` | Scenarios |
+|---|---|
+| Raw clients, blocking API | 1. Cost per request · 2. Concurrency · 3. Latency · 4. Simulated network |
+| Virtual threads | 5. Platform vs. virtual threads |
+| Async APIs | 6. Default threads · 7. Virtual threads |
+| Abstraction layers | 8. Cost per request · 9. WebClient async |
 
-For charts, drop the JSON on <https://jmh.morethan.io>.
+**After a version bump** (or a JDK change):
 
-Read carefully:
+```bash
+# 1. bump the version in gradle/libs.versions.toml and commit it
+# 2. measure everything (or --only the scenarios the bump touches)
+JAVA_VT=/path/to/jdk-25/bin/java scripts/run-all.sh
+# 3. publish the run as a new set, named after what changed
+mv results/local/run-<timestamp> results/<machine>/<date>-okhttp-5.6.0
+rm -r results/<machine>/<date>-okhttp-5.6.0/logs          # keep logs local
+# 4. diff against the previous set of the same machine
+scripts/results.py compare results/<machine>/2026-11-01-baseline results/<machine>/<date>-okhttp-5.6.0 \
+  > results/<machine>/<date>-okhttp-5.6.0/COMPARE-2026-11-01-baseline.md
+# 5. add the set to the table in RESULTS.md; update the conclusions only if they changed
+```
+
+Rules that keep sets comparable:
+
+- **Same machine, same settings.** Compare sets of one machine only; `compare` warns when the CPU
+  differs. Always run with the CPU frequency pinned (`run-all.sh` does it).
+- **One change per set.** Bump one library (or the JDK) at a time, so a regression has one
+  suspect. Label the set after it.
+- **Same labels.** `compare` matches measurements by file label (`cost-t1`, `vt-VIRTUAL-t1024`, ...),
+  benchmark, parameters, threads, executor and client. `run-all.sh` keeps labels stable.
+- **Regression = beyond the noise.** `compare` lists changes in throughput, CPU and allocation per
+  request above `--threshold` (default 5%) whose confidence intervals don't overlap. Runs with
+  identical versions differed by up to ~5%: re-run a flagged scenario before acting on it.
+
+Other tools:
+
+```bash
+scripts/results.py report results/local/run-<timestamp>   # regenerate a REPORT.md
+scripts/summarize.py results/local/*.json                 # quick plain-text table per JSON file
+```
+
+For charts, drop a JSON on <https://jmh.morethan.io>. Reading a single run:
 
 - **Error above ~10%** or a **wide min..max**: look at the per-iteration values in the JSON
   (`rawData`). If values keep rising within a fork, warmup was too short; if a whole fork
   differs from another, there is environment noise.
 - **Differences smaller than the error** are not differences.
-
-To publish results, move the files you want from `results/local/` to `results/<machine>/`.
 
 ## Quick reference
 
@@ -484,15 +531,20 @@ Extra arguments to `bench.sh` go straight to JMH:
 
 ## Pitfalls found along the way
 
-- **POST against nginx `return 200`:** nginx answers before reading the body, so the client
-  never waits for its own upload. `/post` now goes through an internal `proxy_pass`, which
-  forces reading the whole body. To verify, log `$request_length`.
-- **OkHttp and Nagle:** OkHttp leaves Nagle's algorithm on. On a 100 KB POST the last chunk of
-  the body waited for the server's delayed ACK, dropping from ~1,750 to ~50 ops/s. The adapter
-  enables `TCP_NODELAY`, like the other clients.
-- **JDK warmup:** with 10 s of warmup the JDK client was still speeding up between iterations
-  (2.3k → 7.5k ops/s). The default is now 30 s.
-- **Virtual threads on JDK 21:** see scenario 5.
+They would affect any HTTP client benchmark.
+
+| Problem | Symptom | Fix |
+|---|---|---|
+| nginx `return 200` on POST | nginx answers before reading the body; Apache's 100 KB POST was as fast as its 1 KB one | `/post` goes through an internal `proxy_pass`, which reads the whole body; verified with `$request_length` |
+| OkHttp with Nagle's algorithm on | 100 KB POST at ~20 ms per request (50 ops/s): Nagle on the client plus delayed ACK on the server | `TCP_NODELAY` in the adapter, like the other clients: ~1,750 ops/s |
+| Short warmup | JDK speeding up between iterations (2.3k → 7.5k ops/s), ±60% error | 30 s warmup |
+| Variable CPU frequency | forks of one client differing by up to ~35%; ~940 µs per request instead of ~690 µs at 0.5 ms RTT | `TUNE_CPU=1` / `run-all.sh` (`performance` governor, turbo off) |
+| One scenario's server reused by the next | a "with latency" run actually measuring loopback | `server.sh restart`, configuration check in `bench.sh`, `.env` per result |
+| Virtual-thread deadlock on JDK 21 | `jdk-vt` stuck in the first warmup iteration | JMH initializes state in `synchronized`; the benchmark refuses the combination on JDK < 24 |
+| Benchmark error with exit code 0 | a run that throws goes unnoticed by scripts | `-foe true` (fail on error) in `bench.sh` |
+| One failing client discarding a whole step | JMH writes the JSON only at the end | `run-all.sh` keeps going (`FAIL_ON_ERROR=0`) and reports the step as a warning |
+| `jdk.tracePinnedThreads` printing nothing | no trace with forked JMH | `PIN_TRACE=1` runs without forking (diagnostics only) |
+| Inflated CPU per request | up to 3.5 CPUs on a process pinned to 2 | `ResourceProfiler` divides by all of the iteration's operations |
 
 ## Next steps
 

@@ -1,0 +1,16 @@
+# What this result set measured. Library versions from gradle/libs.versions.toml.
+# Measured in three runs (2026-11-01, 2026-11-02 twice) between commits f8efa54 and fadd3f3;
+# the libraries of the earlier runs kept the same versions, later runs only added libraries.
+commit=fadd3f3
+java=openjdk version "21.0.12.1" 2026-08-18 LTS
+java_vt=openjdk version "25.0.5.0.3" 2026-10-24 LTS
+jmh=1.37
+jmh-plugin=0.7.4
+httpclient5=5.6.5
+httpcore5=5.4.4
+okhttp=5.5.1
+jetty=12.1.14
+jetty-reactive=4.1.5
+reactor-netty=1.3.8
+spring=7.0.10
+feign=13.17
