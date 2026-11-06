@@ -3,6 +3,7 @@
 
     scripts/results.py report  <set-dir>              > <set-dir>/REPORT.md
     scripts/results.py compare <old-set> <new-set>    > <new-set>/COMPARE-<old-set-name>.md
+    scripts/results.py scoreboard <set> [--into RESULTS.md]
 
 A result set is one folder holding the JSON + .env files of one measurement campaign (normally
 one scripts/run-all.sh run) and a versions.txt with the library versions it measured. Each file
@@ -418,11 +419,20 @@ def report(path):
             "CPU of the whole client process divided by the requests completed. Differences smaller than",
             "the error are not differences.", ""]
 
+    blocks = scoreboard_blocks(rs)
     out.append("**Contents**\n")
+    if any(blocks.values()):
+        out.append("- Overall evaluation: score by profile, measured value per criterion, engines per layer")
     for scope in SCOPES:
         out.append(f"- {scope.title}: " + ", ".join(
             f"{s.number}. {s.title}" for s in scope.scenarios))
     out.append("")
+    if any(blocks.values()):
+        out += ["---", "", "## Overall evaluation", ""]
+        if blocks["native"]:
+            out += ["### Native clients", "", blocks["native"]]
+        if blocks["layers"]:
+            out += ["### Spring and Feign", "", blocks["layers"], layer_detail(rs) or ""]
 
     for scope in SCOPES:
         out += ["---", "", f"## {scope.title}", "", f"_{scope.question}_", ""]
@@ -442,6 +452,10 @@ def report(path):
                 out += [sample_table(rows), ""]
             if s.layers:
                 out += [layer_table(rows), ""]
+        if scope.title == "Async APIs":
+            models = concurrency_models(rs)
+            if models:
+                out += ["### All models at 1,024 concurrent requests", "", models, ""]
 
     others = [l for l in sorted(by_label) if l not in used]
     if others:
@@ -455,6 +469,371 @@ def report(path):
                 for t in pivot_tables(rows, ["ops", "cpu", "alloc", "threads", "rss"]):
                     out += [t, ""]
     return "\n".join(out).rstrip() + "\n"
+
+
+# --- scoreboard ------------------------------------------------------------------------------
+#
+# Score of one measurement, 0-10, from its ratio to the best client (always >= 1):
+#   - tie: within 2% of the best, or confidence intervals overlapping -> 10
+#   - otherwise 10 x (1 - log(ratio) / log(ZERO_AT)): 2x worse -> 7.0, 5x -> 3.0, 10x or more -> 0
+# A criterion averages its measurements; a profile is a weighted mean of criteria. Change criteria
+# and weights here, never in the generated Markdown.
+
+NATIVE = ["apache5", "okhttp", "jetty", "jdk"]
+TIE_PCT = 2.0
+ZERO_AT = 10.0
+
+
+@dataclass
+class Pick:
+    labels: str          # regex on the file label
+    metric: str          # Row.value metric, or "p99.9" for SampleTime runs
+    bench: str = None
+    params: dict = field(default_factory=dict)
+    text: str = ""       # what this measurement is, shown in the values table
+
+
+@dataclass
+class Criterion:
+    key: str
+    name: str
+    picks: list               # measurements; the criterion score is their mean
+    any_model: bool = False   # each client uses its best variant (jetty-vt-async counts as jetty)
+
+
+CRITERIA = [
+    # Everything that the CPU limits goes into one criterion, so it is not counted several times.
+    Criterion("efficiency", "CPU efficiency", [
+        Pick(r"cost-t1", "cpu", "GetBenchmark", {"payload": "1k"}, "CPU per request, GET 1 KB, 1 thread"),
+        Pick(r"network-500us-t4", "cpu", text="CPU per request, 500 µs RTT, 4 threads"),
+        Pick(r"get-t4", "ops", "GetBenchmark", {"payload": "1k"}, "throughput, CPU saturated, loopback, 4 threads"),
+        Pick(r"network-500us-t16", "ops", text="throughput, CPU saturated, 500 µs RTT, 16 threads"),
+    ]),
+    Criterion("large", "Large bodies", [
+        Pick(r"cost-t1", "time", "GetBenchmark", {"payload": "100k"}, "time per GET 100 KB"),
+        Pick(r"cost-t1", "time", "PostBenchmark", {"payload": "100k"}, "time per POST 100 KB"),
+    ]),
+    Criterion("memory", "Memory", [
+        Pick(r"cost-t1", "alloc", "GetBenchmark", {"payload": "1k"}, "allocated per request, GET 1 KB"),
+    ]),
+    Criterion("tail", "Tail latency", [
+        Pick(r"latency-1k", "p99.9", text="p99.9, GET 1 KB"),
+    ]),
+    Criterion("concurrent", "High concurrency", [
+        Pick(r"vt-(PLATFORM|VIRTUAL)-t1024", "ops"),
+        Pick(r"async(-vt)?", "ops", "GetAsyncBenchmark", {"inFlight": "1024"}),
+    ], any_model=True),
+]
+CONCURRENT_TEXT = "throughput at 1,024 concurrent requests, best model"
+
+PROFILES = [
+    # (name, weights by criterion key; each sums to 100)
+    ("General service", {"efficiency": 40, "large": 10, "memory": 15, "tail": 15, "concurrent": 20}),
+    ("CPU-limited container", {"efficiency": 70, "large": 15, "memory": 10, "tail": 5}),
+    ("Small heap / GC-sensitive", {"memory": 50, "large": 20, "efficiency": 15, "tail": 5, "concurrent": 10}),
+    ("High concurrency", {"concurrent": 60, "efficiency": 30, "memory": 10}),
+]
+
+HIGHER_IS_BETTER = {"ops": True, "time": False, "cpu": False, "alloc": False, "threads": False,
+                    "rss": False, "p99.9": False}
+UNITS = {"ops": "ops/s", "time": "µs", "cpu": "µs", "alloc": "KB", "threads": "threads",
+         "rss": "MB", "p99.9": "µs"}
+SECONDARY = {"cpu": ("cpu.time.norm", 1e-3), "alloc": ("gc.alloc.rate.norm", 1e-3),
+             "threads": ("threads.platform.peak", 1), "rss": ("rss", 1)}
+
+
+def valid_interval(conf):
+    return (isinstance(conf, list) and len(conf) == 2
+            and all(isinstance(x, (int, float)) and not math.isnan(x) for x in conf) and conf[0] > 0)
+
+
+def confidence(row, metric):
+    """99.9% confidence interval of a metric, in the same unit as Row.value, or None."""
+    if metric == "p99.9":
+        return None
+    if metric in ("ops", "time"):
+        conf = row.raw["primaryMetric"].get("scoreConfidence")
+        if not valid_interval(conf):
+            return None
+        if metric == "time":
+            return (row.concurrency * 1e6 / conf[1], row.concurrency * 1e6 / conf[0])
+        return tuple(conf)
+    name, scale = SECONDARY[metric]
+    conf = row.raw.get("secondaryMetrics", {}).get(name, {}).get("scoreConfidence")
+    return (conf[0] * scale, conf[1] * scale) if valid_interval(conf) else None
+
+
+def pick_value(rs, pick, client, any_model):
+    """(value, client variant that produced it, confidence interval or None), or None."""
+    best = None
+    for r in rs.rows:
+        if not re.fullmatch(pick.labels, r.label):
+            continue
+        if pick.bench and r.bench != pick.bench:
+            continue
+        if any(r.params.get(k) != v for k, v in pick.params.items()):
+            continue
+        if (r.client.split("-")[0] != client) if any_model else (r.client != client):
+            continue
+        if pick.metric == "p99.9":
+            v = r.raw["primaryMetric"]["scorePercentiles"].get("99.9")
+        else:
+            v = r.value(pick.metric)
+        if v is None:
+            continue
+        if best is None or (v > best[0]) == HIGHER_IS_BETTER[pick.metric]:
+            best = (v, r.client, confidence(r, pick.metric))
+    return best
+
+
+def measurement_scores(values, higher):
+    """{client: 0-10} for one measurement, values = {client: (value, variant, interval)}."""
+    best_client = (max if higher else min)(values, key=lambda c: values[c][0])
+    best, _, best_conf = values[best_client]
+    out = {}
+    for c, (v, _, conf) in values.items():
+        ratio = best / v if higher else v / best
+        overlap = conf and best_conf and conf[0] <= best_conf[1] and best_conf[0] <= conf[1]
+        if ratio <= 1 + TIE_PCT / 100 or overlap:
+            out[c] = 10.0
+        else:
+            out[c] = max(0.0, 10 * (1 - math.log(ratio) / math.log(ZERO_AT)))
+    return out
+
+
+def criterion_measurements(rs, c, clients):
+    """[(text, metric, {client: (value, variant, interval)}, {client: score})] for one criterion."""
+    if c.any_model:
+        values = {}
+        for client in clients:
+            found = [v for v in (pick_value(rs, p, client, True) for p in c.picks) if v]
+            if found:
+                higher = HIGHER_IS_BETTER[c.picks[0].metric]
+                values[client] = (max if higher else min)(found, key=lambda x: x[0])
+        parts = [(CONCURRENT_TEXT, c.picks[0].metric, values)]
+    else:
+        parts = [(p.text, p.metric, {cl: v for cl in clients if (v := pick_value(rs, p, cl, False))})
+                 for p in c.picks]
+    out = []
+    for text, metric, values in parts:
+        if len(values) == len(clients):
+            out.append((text, metric, values, measurement_scores(values, HIGHER_IS_BETTER[metric])))
+    return out
+
+
+def value_text(metric, value, variant, family):
+    text = f"{fmt('alloc' if metric == 'alloc' else 'ops', value)} {UNITS[metric]}"
+    if variant != family and not variant.startswith(f"{family}-async") and variant != f"{family}-vt-async":
+        text += f" (`{variant}`)"
+    return text
+
+
+def native_scoreboard(rs):
+    measured = []  # (criterion, measurements, {client: criterion score})
+    for c in CRITERIA:
+        parts = criterion_measurements(rs, c, NATIVE)
+        if parts:
+            scores = {cl: sum(p[3][cl] for p in parts) / len(parts) for cl in NATIVE}
+            measured.append((c, parts, scores))
+    if not measured:
+        return None
+    keys = {c.key for c, _, _ in measured}
+
+    profile_scores = []
+    for name, weights in PROFILES:
+        used = {k: w for k, w in weights.items() if k in keys}
+        if not used:
+            continue
+        total = sum(used.values())
+        sc = {cl: sum(w * next(s for c, _, s in measured if c.key == k)[cl] for k, w in used.items()) / total
+              for cl in NATIVE}
+        profile_scores.append((name, sc, total < sum(weights.values())))
+    order = sorted(NATIVE, key=lambda cl: -profile_scores[0][1][cl])
+    clients_header = [f"`{cl}`" for cl in order]
+
+    def score_cells(sc):
+        top = max(sc.values())
+        return [f"**{sc[cl]:.1f}**" if sc[cl] >= top - 0.05 else f"{sc[cl]:.1f}" for cl in order]
+
+    body = []
+    for name, sc, partial in profile_scores:
+        top = max(sc.values())
+        winners = [cl for cl in order if sc[cl] >= top - 0.05]
+        body.append([name + (" \\*" if partial else "")] + score_cells(sc) +
+                    [" = ".join(f"**`{w}`**" for w in winners)])
+    out = ["**Score by profile** (0–10, higher is better)", "",
+           table(["profile"] + clients_header + ["winner"], body), ""]
+    if any(p for *_, p in profile_scores):
+        out += ["\\* some criteria of this profile were not measured in this set; scored on the rest.", ""]
+
+    body = [[f"**{c.name}**"] + score_cells(scores) for c, _, scores in measured]
+    out += ["**Score by criterion**", "", table(["criterion"] + clients_header, body), ""]
+
+    body = []
+    for c, parts, _ in measured:
+        for i, (text, metric, values, scores) in enumerate(parts):
+            cells = []
+            for cl in order:
+                v, variant, _ = values[cl]
+                t = value_text(metric, v, variant, cl)
+                cells.append(f"**{t}**" if scores[cl] == 10 else t)
+            body.append([c.name if i == 0 else "", text] + cells)
+    out += ["**Measured values** (bold: best, or tied with it within the noise)", "",
+            table(["criterion", "measurement"] + clients_header, body), ""]
+
+    body = [[c.name] + [f"{weights[c.key]}%" if c.key in weights else "—" for _, weights in PROFILES]
+            for c, _, _ in measured]
+    out += ["**Weights per profile**", "", table(["criterion"] + [n for n, _ in PROFILES], body), "",
+            f"Rule: each measurement scores 10 for the best client and for any client within {TIE_PCT:g}% "
+            f"of it or with an overlapping confidence interval; the others score "
+            f"10 × (1 − log(ratio) ÷ log {ZERO_AT:g}), so 2x worse is 7.0, 5x is 3.0 and {ZERO_AT:g}x is 0. "
+            "A criterion averages its measurements; a profile is the weighted mean of its criteria. "
+            "Scores are relative to the best client of this set: use `results.py compare` to detect "
+            "regressions. Criteria and weights: `CRITERIA` and `PROFILES` in `scripts/results.py`.", ""]
+    return "\n".join(out)
+
+
+@dataclass
+class LayerGroup:
+    title: str
+    prefix: str
+    throughput: Pick
+    throughput_text: str
+
+
+LAYER_GROUPS = [
+    LayerGroup("Spring `RestClient`", "spring-restclient-",
+               Pick(r"layers-t1", "ops", "GetBenchmark", {"payload": "1k"}), "throughput, 1 KB, 1 thread"),
+    LayerGroup("Spring `WebClient`", "spring-webclient-",
+               Pick(r"layers-async", "ops", "GetAsyncBenchmark", {"inFlight": "1024"}),
+               "throughput, async, 1,024 in flight"),
+    LayerGroup("OpenFeign", "feign-",
+               Pick(r"layers-t1", "ops", "GetBenchmark", {"payload": "1k"}), "throughput, 1 KB, 1 thread"),
+]
+LAYER_WEIGHTS = [  # (column, pick builder, weight)
+    ("CPU per request, 1 KB", lambda g: Pick(r"layers-t1", "cpu", "GetBenchmark", {"payload": "1k"}), 40),
+    ("CPU per request, 100 KB", lambda g: Pick(r"layers-t1", "cpu", "GetBenchmark", {"payload": "100k"}), 20),
+    ("allocation per request, 100 KB", lambda g: Pick(r"layers-t1", "alloc", "GetBenchmark", {"payload": "100k"}), 20),
+    (None, lambda g: g.throughput, 20),
+]
+ENGINE_NAMES = {"apache5": "Apache 5", "okhttp": "OkHttp", "jetty": "Jetty", "jdk": "JDK",
+                "reactor": "Reactor Netty"}
+
+
+def engine_name(group, client):
+    engine = client[len(group.prefix):]
+    name = ENGINE_NAMES.get(engine, engine)
+    return name + (" async" if group.prefix == "spring-webclient-" and engine == "apache5" else "")
+
+
+def layer_data(rs):
+    """[(group, columns [(title, metric, weight, {client: (value, variant, interval)}, {client: score})],
+    ranked clients, {client: score})]"""
+    out = []
+    for g in LAYER_GROUPS:
+        clients = sorted({r.client for r in rs.rows if r.client.startswith(g.prefix)}, key=client_key)
+        cols = []
+        for name, build, weight in LAYER_WEIGHTS:
+            pick = build(g)
+            vals = {c: v for c in clients if (v := pick_value(rs, pick, c, False))}
+            cols.append((name or g.throughput_text, pick.metric, weight, vals))
+        clients = [c for c in clients if all(c in v for *_, v in cols)]
+        if len(clients) < 2:
+            continue
+        scored = []
+        total = defaultdict(float)
+        for name, metric, weight, vals in cols:
+            vals = {c: vals[c] for c in clients}
+            sc = measurement_scores(vals, HIGHER_IS_BETTER[metric])
+            scored.append((name, metric, weight, vals, sc))
+            for c in clients:
+                total[c] += weight * sc[c] / 100
+        out.append((g, scored, sorted(clients, key=lambda c: -total[c]), total))
+    return out
+
+
+def layer_summary(rs):
+    data = layer_data(rs)
+    if not data:
+        return None
+    width = max(len(ranked) for _, _, ranked, _ in data)
+    body = []
+    for g, _, ranked, score in data:
+        cells = [f"**{engine_name(g, c)}** · {score[c]:.1f}" if i == 0 else f"{engine_name(g, c)} · {score[c]:.1f}"
+                 for i, c in enumerate(ranked)]
+        body.append([g.title] + cells + [""] * (width - len(cells)))
+    header = ["layer", "best engine"] + ["2nd", "3rd", "4th", "5th"][:width - 1]
+    return "\n".join(["**Engine score by layer** (0–10, higher is better)", "", table(header, body), "",
+                      "Weights: CPU per request at 1 KB 40%, at 100 KB 20%, allocation at 100 KB 20%, "
+                      "throughput 20% (`WebClient`: async, 1,024 in flight). Same scoring rule as the native "
+                      "clients. Bytes only, no JSON.", ""])
+
+
+def layer_detail(rs):
+    out = []
+    for g, cols, ranked, score in layer_data(rs):
+        body = []
+        for i, c in enumerate(ranked):
+            line = [f"**{engine_name(g, c)}**" if i == 0 else engine_name(g, c)]
+            for _, metric, _, vals, sc in cols:
+                text = f"{fmt('alloc' if metric == 'alloc' else 'ops', vals[c][0])} {UNITS[metric]}"
+                line.append(f"**{text}**" if sc[c] == 10 else text)
+            line.append(f"**{score[c]:.1f}**" if i == 0 else f"{score[c]:.1f}")
+            body.append(line)
+        header = ["engine"] + [f"{n} ({w}%)" for n, _, w, *_ in cols] + ["score"]
+        out += [f"**{g.title}: engines**", "", table(header, body), ""]
+    return "\n".join(out) if out else None
+
+
+CONCURRENCY_MODELS = [
+    ("Blocking, platform threads", Pick(r"vt-PLATFORM-t1024", "ops")),
+    ("Blocking, virtual threads", Pick(r"vt-VIRTUAL-t1024", "ops")),
+    ("Async API", Pick(r"async", "ops", "GetAsyncBenchmark", {"inFlight": "1024"})),
+    ("Async API, virtual threads", Pick(r"async-vt", "ops", "GetAsyncBenchmark", {"inFlight": "1024"})),
+]
+
+
+def concurrency_models(rs):
+    """Throughput at 1,024 concurrent requests per client and model, best variant of each family."""
+    grid = {cl: [pick_value(rs, p, cl, True) for _, p in CONCURRENCY_MODELS] for cl in NATIVE}
+    if sum(1 for v in grid.values() for x in v if x) < 2:
+        return None
+    by_client = {r.client: r for r in rs.rows if re.fullmatch(r"vt-.*-t1024|async(-vt)?", r.label)}
+    body = []
+    for cl in NATIVE:
+        cells = []
+        found = [x for x in grid[cl] if x]
+        top = max((x[0] for x in found), default=None)
+        for x in grid[cl]:
+            if not x:
+                cells.append("—")
+                continue
+            text = f"{x[0] / 1000:.1f}k"
+            if x[1] not in (cl, f"{cl}-async", f"{cl}-vt-async"):
+                text += f" `{x[1]}`"
+            cells.append(f"**{text}**" if x[0] == top else text)
+        body.append([f"`{cl}`"] + cells)
+    return ("**1,024 concurrent requests, every model** (ops/s, best variant of each client; bold: "
+            "best model per client; scenarios 5–7)\n\n" + table(["client"] + [n for n, _ in CONCURRENCY_MODELS], body))
+
+
+def scoreboard_blocks(rs):
+    """Blocks shared by REPORT.md and RESULTS.md (filled with `scoreboard --into`)."""
+    return {"native": native_scoreboard(rs), "layers": layer_summary(rs)}
+
+
+def write_into(path, blocks):
+    """Replace <!-- results.py:NAME --> ... <!-- /results.py:NAME --> blocks in a Markdown file."""
+    with open(path) as f:
+        text = f.read()
+    for name, body in blocks.items():
+        start, end = f"<!-- results.py:{name} -->", f"<!-- /results.py:{name} -->"
+        pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+        if not pattern.search(text):
+            sys.exit(f"{path}: marker {start} ... {end} not found")
+        text = pattern.sub(lambda _: f"{start}\n{body or 'Not measured in this set.'}\n{end}", text)
+    with open(path, "w") as f:
+        f.write(text)
 
 
 # --- compare ---------------------------------------------------------------------------------
@@ -568,8 +947,17 @@ def main():
     cp.add_argument("old")
     cp.add_argument("new")
     cp.add_argument("--threshold", type=float, default=5.0, help="minimum change in percent (default 5)")
+    sp = sub.add_parser("scoreboard", help="weighted scores and winners of one result set")
+    sp.add_argument("set")
+    sp.add_argument("--into", help="Markdown file whose <!-- results.py:NAME --> blocks to replace")
     args = ap.parse_args()
-    if args.cmd == "report":
+    if args.cmd == "scoreboard":
+        blocks = scoreboard_blocks(load_set(args.set))
+        if args.into:
+            write_into(args.into, blocks)
+        else:
+            sys.stdout.write("\n".join(b for b in blocks.values() if b))
+    elif args.cmd == "report":
         sys.stdout.write(report(args.set))
     else:
         sys.stdout.write(compare(args.old, args.new, args.threshold))

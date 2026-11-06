@@ -32,10 +32,100 @@ the error are not differences.
 
 **Contents**
 
+- Overall evaluation: score by profile, measured value per criterion, engines per layer
 - Raw clients, blocking API: 1. Cost per request, 2. Concurrency, 3. Latency distribution, 4. Simulated network
 - Virtual threads: 5. Platform vs. virtual threads
 - Async APIs: 6. Async APIs, default threads, 7. Async APIs, virtual threads
 - Abstraction layers: 8. Layers, cost per request, 9. WebClient used asynchronously
+
+---
+
+## Overall evaluation
+
+### Native clients
+
+**Score by profile** (0–10, higher is better)
+
+| profile | `apache5` | `jetty` | `okhttp` | `jdk` | winner |
+|---|---|---|---|---|---|
+| General service | **9.5** | 8.6 | 8.1 | 5.8 | **`apache5`** |
+| CPU-limited container | **9.7** | 8.2 | 8.2 | 5.4 | **`apache5`** |
+| Small heap / GC-sensitive | 8.3 | **9.4** | 7.8 | 5.7 | **`jetty`** |
+| High concurrency | **9.7** | 8.9 | 8.0 | 7.5 | **`apache5`** |
+
+**Score by criterion**
+
+| criterion | `apache5` | `jetty` | `okhttp` | `jdk` |
+|---|---|---|---|---|
+| **CPU efficiency** | **10.0** | 7.7 | 8.3 | 5.2 |
+| **Large bodies** | **10.0** | 9.7 | 8.4 | 7.4 |
+| **Memory** | 6.5 | **10.0** | 7.3 | 4.7 |
+| **Tail latency** | **10.0** | 8.0 | 8.2 | 3.2 |
+| **High concurrency** | **10.0** | 9.4 | 8.0 | 9.1 |
+
+**Measured values** (bold: best, or tied with it within the noise)
+
+| criterion | measurement | `apache5` | `jetty` | `okhttp` | `jdk` |
+|---|---|---|---|---|---|
+| CPU efficiency | CPU per request, GET 1 KB, 1 thread | **54 µs** | 116 µs | 124 µs | 262 µs |
+|  | CPU per request, 500 µs RTT, 4 threads | **87 µs** | 145 µs | 125 µs | 228 µs |
+|  | throughput, CPU saturated, loopback, 4 threads | **26,215 ops/s** | 15,867 ops/s | 19,983 ops/s | 9,140 ops/s |
+|  | throughput, CPU saturated, 500 µs RTT, 16 threads | **23,358 ops/s** | 16,318 ops/s | 20,177 ops/s | 10,139 ops/s |
+| Large bodies | time per GET 100 KB | **183 µs** | **183 µs** | 250 µs | 373 µs |
+|  | time per POST 100 KB | **289 µs** | 335 µs | 440 µs | 463 µs |
+| Memory | allocated per request, GET 1 KB | 14.0 KB | **6.3 KB** | 11.6 KB | 21.1 KB |
+| Tail latency | p99.9, GET 1 KB | **140 µs** | 222 µs | 213 µs | 679 µs |
+| High concurrency | throughput at 1,024 concurrent requests, best model | **25,071 ops/s** | 21,742 ops/s | 15,853 ops/s | 20,224 ops/s (`jdk-vt`) |
+
+**Weights per profile**
+
+| criterion | General service | CPU-limited container | Small heap / GC-sensitive | High concurrency |
+|---|---|---|---|---|
+| CPU efficiency | 40% | 70% | 15% | 30% |
+| Large bodies | 10% | 15% | 20% | — |
+| Memory | 15% | 10% | 50% | 10% |
+| Tail latency | 15% | 5% | 5% | — |
+| High concurrency | 20% | — | 10% | 60% |
+
+Rule: each measurement scores 10 for the best client and for any client within 2% of it or with an overlapping confidence interval; the others score 10 × (1 − log(ratio) ÷ log 10), so 2x worse is 7.0, 5x is 3.0 and 10x is 0. A criterion averages its measurements; a profile is the weighted mean of its criteria. Scores are relative to the best client of this set: use `results.py compare` to detect regressions. Criteria and weights: `CRITERIA` and `PROFILES` in `scripts/results.py`.
+
+### Spring and Feign
+
+**Engine score by layer** (0–10, higher is better)
+
+| layer | best engine | 2nd | 3rd | 4th |
+|---|---|---|---|---|
+| Spring `RestClient` | **Apache 5** · 10.0 | Jetty · 7.4 | Reactor Netty · 6.9 | JDK · 2.2 |
+| Spring `WebClient` | **Reactor Netty** · 10.0 | Apache 5 async · 8.4 | Jetty · 7.8 | JDK · 2.2 |
+| OpenFeign | **Apache 5** · 10.0 | OkHttp · 8.0 | JDK · 4.8 |  |
+
+Weights: CPU per request at 1 KB 40%, at 100 KB 20%, allocation at 100 KB 20%, throughput 20% (`WebClient`: async, 1,024 in flight). Same scoring rule as the native clients. Bytes only, no JSON.
+
+**Spring `RestClient`: engines**
+
+| engine | CPU per request, 1 KB (40%) | CPU per request, 100 KB (20%) | allocation per request, 100 KB (20%) | throughput, 1 KB, 1 thread (20%) | score |
+|---|---|---|---|---|---|
+| **Apache 5** | **56 µs** | **126 µs** | **219.7 KB** | **13,071 ops/s** | **10.0** |
+| Jetty | 143 µs | 226 µs | **217.3 KB** | 8,059 ops/s | 7.4 |
+| Reactor Netty | 131 µs | 313 µs | 339.4 KB | 7,388 ops/s | 6.9 |
+| JDK | 663 µs | 962 µs | 355.1 KB | 1,990 ops/s | 2.2 |
+
+**Spring `WebClient`: engines**
+
+| engine | CPU per request, 1 KB (40%) | CPU per request, 100 KB (20%) | allocation per request, 100 KB (20%) | throughput, async, 1,024 in flight (20%) | score |
+|---|---|---|---|---|---|
+| **Reactor Netty** | **114 µs** | **183 µs** | **122.5 KB** | **21,611 ops/s** | **10.0** |
+| Apache 5 async | 124 µs | 267 µs | 432.7 KB | **20,544 ops/s** | 8.4 |
+| Jetty | 160 µs | 295 µs | 332.7 KB | 14,096 ops/s | 7.8 |
+| JDK | 961 µs | 1,281 µs | 452.2 KB | 4,985 ops/s | 2.2 |
+
+**OpenFeign: engines**
+
+| engine | CPU per request, 1 KB (40%) | CPU per request, 100 KB (20%) | allocation per request, 100 KB (20%) | throughput, 1 KB, 1 thread (20%) | score |
+|---|---|---|---|---|---|
+| **Apache 5** | **65 µs** | **232 µs** | **385.1 KB** | **11,624 ops/s** | **10.0** |
+| OkHttp | 141 µs | 378 µs | **386.2 KB** | 8,653 ops/s | 8.0 |
+| JDK | 366 µs | 635 µs | 506.3 KB | 3,331 ops/s | 4.8 |
 
 ---
 
@@ -279,6 +369,17 @@ _Can one thread drive many requests in flight through each native async API?_
 | `okhttp-vt-async` | 1,137 | **1,134** | 1,147 |
 | `jetty-vt-async` | **1,135** | 1,147 | **1,143** |
 | `jdk-vt-async` | 1,146 | 1,150 | 1,154 |
+
+### All models at 1,024 concurrent requests
+
+**1,024 concurrent requests, every model** (ops/s, best variant of each client; bold: best model per client; scenarios 5–7)
+
+| client | Blocking, platform threads | Blocking, virtual threads | Async API | Async API, virtual threads |
+|---|---|---|---|---|
+| `apache5` | 24.3k | 22.4k | **25.1k** | 24.7k |
+| `okhttp` | 15.4k | **15.9k** | 13.3k | 14.5k |
+| `jetty` | 17.7k `jetty-vt` | 20.8k | **21.7k** | 21.7k |
+| `jdk` | 14.7k `jdk-vt` | **20.2k `jdk-vt`** | 9.8k | 17.3k |
 
 ---
 

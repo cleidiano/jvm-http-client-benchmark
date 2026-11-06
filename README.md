@@ -446,7 +446,8 @@ results/
       *.json, *.env               raw JMH output and what each run measured
     investigations/
       <date>-<topic>/             one-off studies: README.md (question, evidence, answer) + JSON
-RESULTS.md                        index of the sets + current conclusions, kept short
+RESULTS.md                        current set: generated scores (by profile, by layer) and two
+                                  decision guides, native clients and Spring/Feign
 ```
 
 | Scope in `REPORT.md` | Scenarios |
@@ -468,7 +469,9 @@ rm -r results/<machine>/<date>-okhttp-5.6.0/logs          # keep logs local
 # 4. diff against the previous set of the same machine
 scripts/results.py compare results/<machine>/2026-11-01-baseline results/<machine>/<date>-okhttp-5.6.0 \
   > results/<machine>/<date>-okhttp-5.6.0/COMPARE-2026-11-01-baseline.md
-# 5. add the set to the table in RESULTS.md; update the conclusions only if they changed
+# 5. point RESULTS.md at the new set and regenerate its scoreboard blocks
+scripts/results.py scoreboard results/<machine>/<date>-okhttp-5.6.0 --into RESULTS.md
+# 6. update the decision guides only if a winner or a number they quote changed
 ```
 
 Rules that keep sets comparable:
@@ -483,10 +486,26 @@ Rules that keep sets comparable:
   request above `--threshold` (default 5%) whose confidence intervals don't overlap. Runs with
   identical versions differed by up to ~5%: re-run a flagged scenario before acting on it.
 
+**Scoring.** Five criteria: CPU efficiency (CPU per request and throughput with the CPU
+saturated, merged so they are not counted twice), large bodies, memory, tail latency and high
+concurrency. Each measurement scores 0–10 against the best client of the set:
+
+- **10** for the best, and for anyone within 2% of it or with an overlapping confidence interval
+  (a tie within the noise);
+- otherwise **10 × (1 − log(ratio) ÷ log 10)**: 2x worse is 7.0, 5x is 3.0, 10x or more is 0.
+
+A criterion averages its measurements; native clients get one weighted score per **profile**
+(general service, CPU-limited container, small heap / GC-sensitive, high concurrency); Spring and
+Feign engines are ranked within each layer with the same rule. Scores are relative to the best
+client of the set, so they don't show regressions: `compare` does. Criteria and weights live in
+`CRITERIA`, `PROFILES` and `LAYER_WEIGHTS` in `scripts/results.py`; changing them changes every
+score, so say so in the commit message.
+
 Other tools:
 
 ```bash
 scripts/results.py report results/local/run-<timestamp>   # regenerate a REPORT.md
+scripts/results.py scoreboard <set>                       # weighted scores and winners only
 scripts/summarize.py results/local/*.json                 # quick plain-text table per JSON file
 ```
 

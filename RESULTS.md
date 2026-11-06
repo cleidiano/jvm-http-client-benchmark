@@ -1,135 +1,135 @@
 # Results
 
-Every number here links back to a **result set**: one folder of JMH output for one set of library
-versions on one machine. Full tables are in each set's `REPORT.md`; this page keeps the index and
-the conclusions. How sets are produced and compared: [README](README.md#results-and-regressions).
-
-## Result sets
-
-| Machine | Set | What it measured | Report | Compared with |
-|---|---|---|---|---|
-| i7-5500U | `2026-11-01-baseline` | first measurement: Apache 5.6.5, OkHttp 5.5.1, Jetty 12.1.14, Reactor Netty 1.3.8, Spring 7.0.10, Feign 13.17; JDK 21.0.12 and 25.0.5 | [REPORT.md](results/i7-5500U/2026-11-01-baseline/REPORT.md) | — |
-
-**Noise to expect between sets:** with identical versions, two runs on this machine differed by up
-to ~5% (once 20%, Apache at 1 thread). `scripts/results.py compare` only flags changes above 5% whose
-confidence intervals don't overlap; re-run a scenario before trusting a single flagged regression.
-
-## Investigations
-
-One-off studies, outside the regular scenarios.
-
-| Machine | Investigation | Answer |
-|---|---|---|
-| i7-5500U | [OkHttp pool scan](results/i7-5500U/investigations/2026-11-01-okhttp-pool-scan/README.md) | OkHttp scans its whole pool for a free connection on every request: 26% of CPU at 1,024 connections |
-
----
-
-## Conclusions
-
-> Current set: **i7-5500U / 2026-11-01-baseline**. One 2-core/4-thread laptop, CPU pinned at
-> 2.4 GHz, HTTP/1.1 without TLS. Absolute numbers hold for this machine only; the order between
-> clients and the shape of the costs should carry over.
-
-### At a glance
-
-| | `apache5` | `okhttp` | `jetty` | `jdk` |
-|---|---|---|---|---|
-| CPU per request, GET 1 KB, 1 thread | **54 µs** | 124 µs | 116 µs | 262 µs |
-| Allocation per request, GET 1 KB | 14.0 KB | 11.6 KB | **6.3 KB** | 21.1 KB |
-| Throughput, loopback, 4 threads, GET 1 KB | **26.2k** | 20.0k | 15.9k | 9.1k |
-| Latency p99.9, GET 1 KB | **140 µs** | 213 µs | 222 µs | 679 µs |
-| Throughput at 1,024 concurrent requests, best model | **25.1k** (async client) | 15.9k (blocking, VT) | 21.7k (async API) | 20.2k (blocking, VT + VT executor) |
-
-### Raw clients (scenarios 1–4)
-
-- **Apache:** lowest fixed cost per request. 2.1–5.9x less CPU than the others on small requests.
-- **Jetty:** lowest cost per byte. Allocates about the body size on downloads; ties Apache on a
-  100 KB GET (183 µs each).
-- **OkHttp:** about 2x Apache's CPU. At 16 threads on loopback it matches Apache (24.2k vs.
-  23.2k ±12% ops/s).
-- **JDK:** 1.6–3x Apache's time and 2.9–5.9x its CPU. Longest tail: p99.99 3.9 ms vs. 0.5–0.7 ms.
-- **With 500 µs RTT:** at 1–4 threads throughput ties (JDK ~11% behind) but CPU per request still
-  differs 2.6x. At 16 threads the CPU saturates and the loopback order returns.
-
-POST times include an nginx `proxy_pass`: compare clients within one request type only.
-
-### Virtual threads (scenario 5, JDK 25)
-
-| | Effect at 1,024 threads | Effect at 64–256 threads |
-|---|---|---|
-| `jetty`, `jdk`, `jdk-vt` | **+30 to +39% throughput**, 24–30% less CPU | ~same CPU (`jdk-vt`: −9 to −18%) |
-| `jetty-vt` | +16% throughput | −15% CPU |
-| `apache5`, `okhttp` | no gain (0.92x, 1.03x) | **+15 to +36% CPU** |
-| all | −89 to −134 MB RSS (~100–130 KB per avoided platform thread) | |
-
-- The gain goes to clients that hand work between threads internally. Clients that block on the
-  calling thread pay for the extra poller handoff (hypothesis, not profiled).
-- **JDK 21:** a virtual thread inside `synchronized` pins its carrier: deadlock with `jdk-vt`,
-  pinning in OkHttp while connecting. Use JDK 24+.
-
-### Async APIs (scenarios 6–7, JDK 25)
-
-1,024 concurrent requests, ops/s (platform threads alive):
-
-| | Blocking, platform threads | Blocking, virtual threads | Async API | Async API + virtual threads |
-|---|---|---|---|---|
-| Apache 5 | 24.3k (1,030) | 22.4k (11) | **25.1k (10)** | — |
-| Jetty | 15.0k (1,231) | 20.8k (211) | **21.7k (208)** | **21.7k (13)** |
-| JDK | 9.0k (1,183) | **20.2k (11)**\* | 9.8k (166) | 17.3k (12) |
-| OkHttp | 15.4k (1,061) | **15.9k (66)** | 13.3k (887) | 14.5k (100) |
-
-\* `jdk-vt`: the client's internal executor also on virtual threads. Blocking and async columns
-come from runs on different days: treat differences below ~5% across columns as ties.
-
-- **Apache's async client:** the throughput and CPU of the classic client with 10 threads.
-- **Jetty:** async API +45% over blocking calls; `VirtualThreadPool` cuts CPU by a third at 64–256.
-- **JDK:** the async API alone changes nothing; the virtual-thread executor is what helps.
-- **OkHttp:** `enqueue` holds one platform thread per call in flight. Every model stops at
-  ~13–16k (see the pool-scan investigation).
-
-### Abstraction layers (scenarios 8–9, bytes only, no JSON)
-
-| Layer on engine | + CPU per request, 1 KB | ÷ raw throughput | Note |
+| Machine | Current set | Versions | Full tables |
 |---|---|---|---|
-| RestClient on Apache 5 | **+10 µs** | 0.91x | cheapest blocking layer |
-| WebClient on Reactor Netty | +19 µs | 0.87x (0.87x async) | +9 KB at 100 KB: passes the body through |
-| Feign on Apache 5 / OkHttp | +18 / +19 µs | 0.81x / 0.86x | copies the body: +168–232 KB per 100 KB |
-| RestClient on Jetty / Reactor Netty | +29 / +36 µs | 0.78x / 0.80x | |
-| WebClient async on Jetty / JDK | +57 / +214 µs | 0.63x / 0.50x | unstable (±25%) |
-| RestClient on JDK | **+396 µs** | 0.46x | Spring Boot's fallback when no other client is on the classpath |
+| i7-5500U (2 cores / 4 threads, pinned at 2.4 GHz) | `2026-11-01-baseline` | Apache 5.6.5 · OkHttp 5.5.1 · Jetty 12.1.14 · Reactor Netty 1.3.8 · Spring 7.0.10 · Feign 13.17 · JDK 21.0.12 / 25.0.5 | [REPORT.md](results/i7-5500U/2026-11-01-baseline/REPORT.md) |
 
-- The engine matters more than the layer: the same RestClient costs +10 µs on Apache and +396 µs
-  on the JDK client (cause not profiled).
-- Spring Boot 4.0.9 picks the engine in this order: Apache 5, Jetty, Reactor Netty, JDK,
-  `HttpURLConnection`. Adding `httpclient5` makes it pick the cheapest.
+HTTP/1.1, no TLS, responses read as bytes. Absolute numbers hold for this machine only; the
+order between clients should carry over. Sets and regressions: [README](README.md#results-and-regressions).
 
 ---
 
-## When to pick each client
+## 1. Native clients: score by profile
 
-| Situation | Pick | Evidence |
-|---|---|---|
-| Many small calls, CPU is the limit (JSON APIs, microservices, small containers) | **Apache 5** | 39 µs CPU per GET 0 B vs. 97–202 µs; the order holds with 500 µs RTT |
-| Small heap, GC-sensitive, large responses | **Jetty** | 4.6 KB per request vs. 10–18 KB; ~1x the body on downloads |
-| Large uploads | **Apache 5** or **Jetty** | 11 KB and 6 KB allocated per 100 KB POST, vs. 60–122 KB |
-| Tens of connections, Android/Kotlin ecosystem | **OkHttp** | matches Apache at 16 threads on loopback |
-| Hundreds+ concurrent HTTP/1.1 requests to one host | **Apache 5** or **Jetty**, not OkHttp | OkHttp: 0.63–0.71x Apache at 1,024 |
-| Thousands in flight with few threads | **Apache 5 async** | 25.1k ops/s with 10 platform threads |
-| Spring `RestClient` | on **Apache 5** | +10 µs vs. +396 µs on the JDK client |
-| Spring `WebClient` | on **Reactor Netty** | +19 µs; 0.87x raw when async |
-| No dependencies, low volume (CLIs, scripts) | **JDK** | within 10–20% of the others with network latency at 1–4 threads |
-| Latency-critical path | not **JDK** | p99.99 3.9 ms vs. 0.5–0.7 ms |
+<!-- results.py:native -->
+**Score by profile** (0–10, higher is better)
 
-Features may weigh more than these numbers: the JDK client has zero dependencies and HTTP/2;
-OkHttp is standard on Android; Jetty has HTTP/2 and HTTP/3; Apache has classic and async APIs.
+| profile | `apache5` | `jetty` | `okhttp` | `jdk` | winner |
+|---|---|---|---|---|---|
+| General service | **9.5** | 8.6 | 8.1 | 5.8 | **`apache5`** |
+| CPU-limited container | **9.7** | 8.2 | 8.2 | 5.4 | **`apache5`** |
+| Small heap / GC-sensitive | 8.3 | **9.4** | 7.8 | 5.7 | **`jetty`** |
+| High concurrency | **9.7** | 8.9 | 8.0 | 7.5 | **`apache5`** |
 
-## Open questions
+**Score by criterion**
 
-| Question | Status |
+| criterion | `apache5` | `jetty` | `okhttp` | `jdk` |
+|---|---|---|---|---|
+| **CPU efficiency** | **10.0** | 7.7 | 8.3 | 5.2 |
+| **Large bodies** | **10.0** | 9.7 | 8.4 | 7.4 |
+| **Memory** | 6.5 | **10.0** | 7.3 | 4.7 |
+| **Tail latency** | **10.0** | 8.0 | 8.2 | 3.2 |
+| **High concurrency** | **10.0** | 9.4 | 8.0 | 9.1 |
+
+**Measured values** (bold: best, or tied with it within the noise)
+
+| criterion | measurement | `apache5` | `jetty` | `okhttp` | `jdk` |
+|---|---|---|---|---|---|
+| CPU efficiency | CPU per request, GET 1 KB, 1 thread | **54 µs** | 116 µs | 124 µs | 262 µs |
+|  | CPU per request, 500 µs RTT, 4 threads | **87 µs** | 145 µs | 125 µs | 228 µs |
+|  | throughput, CPU saturated, loopback, 4 threads | **26,215 ops/s** | 15,867 ops/s | 19,983 ops/s | 9,140 ops/s |
+|  | throughput, CPU saturated, 500 µs RTT, 16 threads | **23,358 ops/s** | 16,318 ops/s | 20,177 ops/s | 10,139 ops/s |
+| Large bodies | time per GET 100 KB | **183 µs** | **183 µs** | 250 µs | 373 µs |
+|  | time per POST 100 KB | **289 µs** | 335 µs | 440 µs | 463 µs |
+| Memory | allocated per request, GET 1 KB | 14.0 KB | **6.3 KB** | 11.6 KB | 21.1 KB |
+| Tail latency | p99.9, GET 1 KB | **140 µs** | 222 µs | 213 µs | 679 µs |
+| High concurrency | throughput at 1,024 concurrent requests, best model | **25,071 ops/s** | 21,742 ops/s | 15,853 ops/s | 20,224 ops/s (`jdk-vt`) |
+
+**Weights per profile**
+
+| criterion | General service | CPU-limited container | Small heap / GC-sensitive | High concurrency |
+|---|---|---|---|---|
+| CPU efficiency | 40% | 70% | 15% | 30% |
+| Large bodies | 10% | 15% | 20% | — |
+| Memory | 15% | 10% | 50% | 10% |
+| Tail latency | 15% | 5% | 5% | — |
+| High concurrency | 20% | — | 10% | 60% |
+
+Rule: each measurement scores 10 for the best client and for any client within 2% of it or with an overlapping confidence interval; the others score 10 × (1 − log(ratio) ÷ log 10), so 2x worse is 7.0, 5x is 3.0 and 10x is 0. A criterion averages its measurements; a profile is the weighted mean of its criteria. Scores are relative to the best client of this set: use `results.py compare` to detect regressions. Criteria and weights: `CRITERIA` and `PROFILES` in `scripts/results.py`.
+
+<!-- /results.py:native -->
+
+## 2. Spring and Feign: score by layer
+
+<!-- results.py:layers -->
+**Engine score by layer** (0–10, higher is better)
+
+| layer | best engine | 2nd | 3rd | 4th |
+|---|---|---|---|---|
+| Spring `RestClient` | **Apache 5** · 10.0 | Jetty · 7.4 | Reactor Netty · 6.9 | JDK · 2.2 |
+| Spring `WebClient` | **Reactor Netty** · 10.0 | Apache 5 async · 8.4 | Jetty · 7.8 | JDK · 2.2 |
+| OpenFeign | **Apache 5** · 10.0 | OkHttp · 8.0 | JDK · 4.8 |  |
+
+Weights: CPU per request at 1 KB 40%, at 100 KB 20%, allocation at 100 KB 20%, throughput 20% (`WebClient`: async, 1,024 in flight). Same scoring rule as the native clients. Bytes only, no JSON.
+
+<!-- /results.py:layers -->
+
+---
+
+## 3. Decision guide: native clients
+
+| I need... | Use | Avoid | Evidence |
+|---|---|---|---|
+| A default for a server-side service | **Apache 5** | — | wins 3 of 4 profiles |
+| Many small calls on little CPU (JSON APIs, small containers) | **Apache 5** | JDK | CPU per GET 1 KB: 54 µs vs. 262 µs |
+| Low allocation: small heap, GC pauses, large responses | **Jetty** | JDK, Apache 5 | 6.3 KB per request; ~1x the body on downloads (Apache and JDK ~2x) |
+| Large uploads | **Apache 5** or **Jetty** | OkHttp, JDK | 11 KB and 6 KB allocated per 100 KB POST vs. 60–122 KB |
+| Thousands of requests in flight with few threads | **Apache 5 async**, Jetty async | OkHttp | 25.1k and 21.7k ops/s at 1,024 with 10–13 threads vs. 15.9k |
+| Hundreds+ concurrent HTTP/1.1 requests to one host | Apache 5, Jetty | **OkHttp** | OkHttp scans its whole pool per request: 0.63–0.71x Apache ([investigation](results/i7-5500U/investigations/2026-11-01-okhttp-pool-scan/README.md)) |
+| A virtual-thread application | Apache 5 (still fastest); JDK with a VT executor; Jetty | expecting VT to speed up Apache or OkHttp | VT: JDK/Jetty +30–39% at 1,024; Apache/OkHttp +15–36% CPU |
+| The lowest tail latency | **Apache 5** | **JDK** | p99.9 140 µs vs. 679 µs; p99.99 0.5 ms vs. 3.9 ms |
+| Android or Kotlin, tens of connections | **OkHttp** | — | matches Apache at 16 threads on loopback (24.2k vs. 23.2k ops/s) |
+| Zero dependencies, low volume (CLIs, scripts) | **JDK** | — | within 10–20% of the others once there is network latency |
+| Virtual threads on JDK 21 | JDK 24+ | — | `synchronized` pins carriers: deadlock with `jdk-vt`, pinning in OkHttp |
+
+Features may outweigh these numbers: JDK has zero dependencies and HTTP/2; OkHttp is the Android
+standard; Jetty has HTTP/2 and HTTP/3; Apache has classic and async APIs.
+
+## 4. Decision guide: Spring and Feign
+
+Two separate choices. The **layer** follows the programming model; the **engine** under it
+decides the cost (the same `RestClient` adds +10 µs on Apache 5 and +396 µs on the JDK client).
+
+| Layer | Programming model | Best engine | CPU per request, 1 KB | Added by the layer |
+|---|---|---|---|---|
+| `RestClient` | blocking, fluent | Apache 5 | **56 µs** | +10 µs |
+| OpenFeign | blocking, declarative interface | Apache 5 | 65 µs | +18 µs |
+| `WebClient` | reactive (`Mono` / `Flux`) | Reactor Netty | 114 µs blocking · 93 µs async | +19 µs · +15 µs |
+
+| I use... | Engine | Avoid | Evidence |
+|---|---|---|---|
+| `RestClient` in Spring Boot | **Apache 5**: add `httpclient5`, Boot picks it first | JDK client: Boot's fallback when no other client is on the classpath | +10 µs vs. +396 µs per request |
+| `WebClient` in a reactive app | **Reactor Netty** (WebFlux default) | JDK, Jetty | async: 0.87x raw Reactor Netty; JDK/Jetty 0.50–0.63x and ±25% unstable |
+| `WebClient` in a blocking app (`.block()`) | switch to `RestClient` on Apache 5 | — | 56 µs vs. 114 µs CPU per request |
+| OpenFeign | **Apache 5** (`feign-hc5`) | JDK (`feign-java11`) | 65 µs vs. 366 µs CPU per request |
+| Large responses through a layer | `RestClient` on Apache 5, `WebClient` on Reactor Netty | **Feign**, any engine | added allocation per 100 KB: +3 and +9 KB vs. +168–280 KB (Feign copies the body) |
+
+Spring Boot 4.0.9 picks the `RestClient` engine in this order: Apache 5, Jetty, Reactor Netty,
+JDK, `HttpURLConnection`.
+
+---
+
+## Appendix
+
+| Investigation | Answer |
+|---|---|
+| [OkHttp pool scan](results/i7-5500U/investigations/2026-11-01-okhttp-pool-scan/README.md) | OkHttp scans its whole pool for a free connection on every request: 26% of CPU at 1,024 connections |
+
+| Open question | Status |
 |---|---|
 | Why is the JDK client slower, unstable at 4+ threads, with a long tail? | not profiled |
 | Why do Spring's JDK-client integrations cost +396 to +694 µs? | not profiled |
 | Why do virtual threads add CPU to blocking clients? | poller-handoff hypothesis, not profiled |
-| GC effect with a small heap and live data | not measured; the 1 GB heap understates it |
-| Retained memory (Jetty's buffer pools) | not measured |
+| GC with a small heap and live data; retained memory of Jetty's pools | not measured |
 | HTTP/2, TLS, JSON conversion, POST through async APIs | not measured |
+| Reactor Netty as a standalone client | measured only as a Spring engine, not scored |
